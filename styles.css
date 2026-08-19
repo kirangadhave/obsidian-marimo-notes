@@ -83,3 +83,43 @@
 		transform: translateX(350%);
 	}
 }
+
+/* live-preview island widget: hover reveals the edit affordance */
+.marimo-lp-block .marimo-island-block {
+	position: relative;
+}
+
+.marimo-lp-edit {
+	position: absolute;
+	top: var(--size-4-1);
+	right: var(--size-4-1);
+	z-index: 100;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	line-height: 1;
+	padding: var(--size-2-2) var(--size-2-3);
+	color: var(--text-muted);
+	background: var(--background-primary);
+	border: none;
+	border-radius: var(--radius-s);
+	box-shadow: none;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 150ms ease, background 150ms ease;
+}
+
+/* Match the icon metrics of Obsidian's native edit button. */
+.marimo-lp-edit svg {
+	width: var(--icon-size, 18px);
+	height: var(--icon-size, 18px);
+}
+
+.marimo-lp-block:hover .marimo-lp-edit {
+	opacity: 1;
+}
+
+.marimo-lp-edit:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}

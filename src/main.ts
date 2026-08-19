@@ -6,13 +6,14 @@ import {
 } from "obsidian";
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
+import { MARIMO_MD_FENCE, marimoFenceField } from "./live-preview";
 
 /**
  * Pin the islands runtime to a marimo release. The runtime resolves its own
  * matching marimo wheel + Pyodide at this version, so bumping this constant
  * upgrades the whole stack.
  */
-const ISLANDS_VERSION = "0.23.16";
+const ISLANDS_VERSION = "0.24.0";
 const CDN_BASE = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VERSION}/dist`;
 
 interface IslandsRuntime {
@@ -26,9 +27,6 @@ const dynamicImport = new Function(
 	"url",
 	"return import(url)",
 ) as (url: string) => Promise<IslandsRuntime>;
-
-/** Matches marimo's markdown notebook fences: ```python {.marimo ...} */
-const MARIMO_MD_FENCE = /^(?:`{3,}|~{3,})\s*\{?python[\s.,]+[^}]*marimo/i;
 
 /** Obsidian's legacy CodeMirror mode registry (used for fence highlighting). */
 interface CodeMirrorLike {
@@ -68,16 +66,18 @@ export default class MarimoPlugin extends Plugin {
 	private bootError: string | null = null;
 
 	async onload() {
-		// ```marimo fenced blocks → reactive island cells.
-		this.registerMarkdownCodeBlockProcessor("marimo", (source, el, ctx) => {
-			this.renderIsland(source, el, ctx);
+		// Both fence flavors — ```marimo and ```python {.marimo} — share one
+		// pipeline: this post-processor in reading view, the editor extension
+		// below in live preview. No code-block processor: registering one
+		// would make Obsidian wrap ```marimo fences in its own embed widget,
+		// a second widget system with its own edit chrome.
+		this.registerMarkdownPostProcessor((el, ctx) => {
+			this.upgradeMarimoBlocks(el, ctx);
 		});
 
-		// marimo's own notebook-as-markdown flavor: ```python {.marimo}.
-		// Runs after default rendering, so plain python blocks are untouched.
-		this.registerMarkdownPostProcessor((el, ctx) => {
-			this.upgradeMarimoPythonBlocks(el, ctx);
-		});
+		// The same flavor in live preview, where fences render as editor
+		// text and the post-processor above never runs.
+		this.registerEditorExtension(marimoFenceField(this));
 
 		// Refresh loader texts (catches the slow-first-boot hint in stage 1)
 		// and keep marimo widget shadow roots free of Obsidian's stylesheet.
@@ -131,6 +131,7 @@ export default class MarimoPlugin extends Plugin {
 				void this.initializeIslands();
 			},
 		});
+
 	}
 
 	onunload() {
@@ -146,6 +147,11 @@ export default class MarimoPlugin extends Plugin {
 		el: HTMLElement,
 		ctx: MarkdownPostProcessorContext,
 	) {
+		this.buildIsland(el, source, ctx.sourcePath);
+	}
+
+	/** Shared island construction for reading view and live preview. */
+	buildIsland(el: HTMLElement, source: string, sourcePath: string) {
 		const code = source.trim();
 		if (!code) {
 			return;
@@ -163,7 +169,7 @@ export default class MarimoPlugin extends Plugin {
 		// All cells from the same note share one app id, i.e. one reactive
 		// notebook: a slider in one block reruns dependent blocks below it.
 		wrapper.innerHTML = islandHtml(
-			appIdForPath(ctx.sourcePath),
+			appIdForPath(sourcePath),
 			code,
 			this.loaderText(),
 		);
@@ -171,25 +177,32 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	/**
-	 * Finds default-rendered ```python {.marimo} blocks and swaps them for
-	 * islands. The attribute lives in the fence info string, which Obsidian
-	 * drops during rendering, so it is re-read from the section source.
+	 * Finds default-rendered marimo blocks and swaps them for islands.
+	 * A ```marimo fence is recognizable by its language class alone. For
+	 * ```python {.marimo}, the attribute lives in the fence info string,
+	 * which Obsidian drops during rendering, so it is re-read from the
+	 * section source. Plain python blocks are untouched.
 	 */
-	private upgradeMarimoPythonBlocks(
+	private upgradeMarimoBlocks(
 		el: HTMLElement,
 		ctx: MarkdownPostProcessorContext,
 	) {
 		const codeBlocks = Array.from(
-			el.querySelectorAll<HTMLElement>("pre > code.language-python"),
+			el.querySelectorAll<HTMLElement>(
+				"pre > code.language-marimo, pre > code.language-python",
+			),
 		);
 		for (const codeBlock of codeBlocks) {
-			const section = ctx.getSectionInfo(codeBlock);
-			if (!section) {
-				continue;
-			}
-			const fenceLine = section.text.split("\n")[section.lineStart] ?? "";
-			if (!MARIMO_MD_FENCE.test(fenceLine.trim())) {
-				continue;
+			if (codeBlock.classList.contains("language-python")) {
+				const section = ctx.getSectionInfo(codeBlock);
+				if (!section) {
+					continue;
+				}
+				const fenceLine =
+					section.text.split("\n")[section.lineStart] ?? "";
+				if (!MARIMO_MD_FENCE.test(fenceLine.trim())) {
+					continue;
+				}
 			}
 			const pre = codeBlock.parentElement;
 			if (!pre?.parentElement) {

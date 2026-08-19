@@ -26,7 +26,11 @@ slider reruns the dependent cell below it.
 marimo's own [notebook-as-markdown format](https://docs.marimo.io/guides/exporting/markdown/)
 is also supported — fences like ```` ```python {.marimo} ```` are upgraded to
 islands, so a file produced by `marimo export md notebook.py` renders as a
-runnable notebook when opened in Obsidian.
+runnable notebook when opened in Obsidian. These fences render in both reading
+view and live preview. In live preview, hover an island and use the `</>`
+button (or move the cursor into the block) to edit the fence source. This works in reading view and in
+live preview; in live preview, move the cursor into a block (or use its hover
+edit button) to edit the source.
 
 ## How it works
 
