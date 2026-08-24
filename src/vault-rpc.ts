@@ -1,11 +1,11 @@
 /**
  * Vault RPC dispatcher for requests from Python over MessagePort.
- * Handles request/response protocol with structured error codes.
  */
 
 export type ErrorCode =
 	| "unknown_op"
 	| "invalid_path"
+	| "invalid_arg"
 	| "denied_config_dir"
 	| "denied_extension"
 	| "denied_self_write"
@@ -36,11 +36,22 @@ interface ErrorResponse {
 
 type Response = SuccessResponse | ErrorResponse;
 
+/**
+ * Narrow interface that declares only the capabilities the vault RPC
+ * dispatcher needs from the host. Isolates the protocol from the broader
+ * plugin interface.
+ */
+export interface VaultRpcHost {
+	getFiles(): Array<{ path: string; ext: string; size: number; mtime: number }>;
+}
+
 export class VaultRpc {
 	private port: MessagePort;
+	private host: VaultRpcHost;
 
-	constructor(port: MessagePort) {
+	constructor(port: MessagePort, host: VaultRpcHost) {
 		this.port = port;
+		this.host = host;
 		this.port.onmessage = (ev) => this.handleRequest(ev.data);
 		this.port.start();
 	}
@@ -80,12 +91,40 @@ export class VaultRpc {
 		);
 	}
 
-	private async dispatchOp(op: string, _request: Request): Promise<unknown> {
+	private async dispatchOp(op: string, request: Request): Promise<unknown> {
 		if (op === "ping") {
 			return "pong";
 		}
 
+		if (op === "files") {
+			return this.opFiles(request);
+		}
+
 		throw new VaultRpcError("unknown_op", `Unknown operation: ${op}`);
+	}
+
+	private opFiles(request: Request): unknown {
+		const ext = request.ext;
+
+		if (
+			ext !== undefined &&
+			ext !== null &&
+			typeof ext !== "string"
+		) {
+			throw new VaultRpcError("invalid_arg", "ext must be a string");
+		}
+
+		const files = this.host.getFiles();
+
+		if (!ext) {
+			return files;
+		}
+
+		// Obsidian stores the extension without a dot, but a caller writes
+		// either form.
+		const wanted = ext.replace(/^\./, "").toLowerCase();
+
+		return files.filter((f) => f.ext.toLowerCase() === wanted);
 	}
 
 	private sendResponse(response: Response): void {

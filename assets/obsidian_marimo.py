@@ -9,14 +9,11 @@ Provided by the obsidian-marimo plugin. Usage:
 """
 
 import asyncio
-import json
 from typing import Any
 
 import js
 from pyodide.ffi import create_proxy, to_js
 from pyodide.http import pyfetch
-
-VAULT_INDEX = ".obsidian/plugins/marimo/vault-index.json"
 
 
 class VaultError(Exception):
@@ -149,9 +146,28 @@ class Vault:
         resp = await pyfetch(f"{self.base}{path}?t={js.Date.now()}")
         return await resp.string()
 
-    async def files(self) -> list:
-        """Live index of the vault's markdown files (path, size, mtime)."""
-        return json.loads(await self.read(VAULT_INDEX))
+    async def files(self, ext: str | None = None) -> list[dict[str, Any]]:
+        """Query the vault's files.
+
+        Args:
+            ext (str | None, optional): Filter by file extension.
+                A leading dot is optional. Both `.md` and `md` work.
+                Comparison is case-insensitive. If not provided, all
+                files in the vault are returned.
+
+        Returns:
+            A list of dicts, each with "path" (str), "ext" (str, file
+            extension without leading dot), "size" (int), and "mtime"
+            (int, milliseconds since epoch).
+
+        Raises:
+            VaultError: If the operation fails or the extension argument
+                is invalid.
+        """
+        kwargs = {}
+        if ext is not None:
+            kwargs["ext"] = ext
+        return await self._port._call("files", **kwargs)
 
 
 vault = Vault()

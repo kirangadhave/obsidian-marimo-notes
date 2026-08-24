@@ -7,7 +7,7 @@ import {
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
 import { MARIMO_MD_FENCE, marimoFenceField } from "./live-preview";
-import { VaultRpc } from "./vault-rpc";
+import { VaultRpc, type VaultRpcHost } from "./vault-rpc";
 
 /**
  * Pin the islands runtime to a marimo release. The runtime resolves its own
@@ -56,7 +56,6 @@ export default class MarimoPlugin extends Plugin {
 	private runtime: Promise<IslandsRuntime> | null = null;
 	private styleEl: HTMLElement | null = null;
 	private initTimer: number | null = null;
-	private indexTimer: number | null = null;
 	private bootstrapContainer: HTMLElement | null = null;
 	private workerPatched = false;
 	private initializedCells = new Set<string>();
@@ -110,20 +109,6 @@ export default class MarimoPlugin extends Plugin {
 				this.scheduleInitialize(),
 			),
 		);
-
-		// Maintain vault-index.json so notebooks can list the vault's files
-		// dynamically (app:// URLs cannot list directories). Rewritten on
-		// every vault change, debounced.
-		this.app.workspace.onLayoutReady(() => {
-			void this.writeVaultIndex();
-			for (const event of ["create", "delete", "rename", "modify"] as const) {
-				this.registerEvent(
-					this.app.vault.on(event as "modify", () =>
-						this.scheduleVaultIndex(),
-					),
-				);
-			}
-		});
 
 		this.addCommand({
 			id: "reinitialize",
@@ -612,7 +597,16 @@ export default class MarimoPlugin extends Plugin {
 			"port" in data &&
 			data.port instanceof MessagePort
 		) {
-			this.vaultRpc = new VaultRpc(data.port);
+			const host: VaultRpcHost = {
+				getFiles: () =>
+					this.app.vault.getFiles().map((f) => ({
+						path: f.path,
+						ext: f.extension,
+						size: f.stat.size,
+						mtime: f.stat.mtime,
+					})),
+			};
+			this.vaultRpc = new VaultRpc(data.port, host);
 			return;
 		}
 
@@ -643,44 +637,6 @@ export default class MarimoPlugin extends Plugin {
 	 * (a blob that ESM-imports the real worker module) to hide `process` before
 	 * the module evaluates, so Pyodide detects a browser worker.
 	 */
-	/**
-	 * Snapshot of the vault's markdown file index, taken at worker creation.
-	 * Python reads it via json.loads(str(js.__VAULT_FILES__)). For a live
-	 * view, fetch vault-index.json instead (see writeVaultIndex).
-	 */
-	private vaultFilesGlobal(): string {
-		return `globalThis.__VAULT_FILES__=${JSON.stringify(JSON.stringify(this.vaultFileIndex()))};`;
-	}
-
-	private vaultFileIndex() {
-		return this.app.vault.getMarkdownFiles().map((f) => ({
-			path: f.path,
-			size: f.stat.size,
-			mtime: f.stat.mtime,
-		}));
-	}
-
-	private scheduleVaultIndex() {
-		if (this.indexTimer !== null) {
-			window.clearTimeout(this.indexTimer);
-		}
-		this.indexTimer = window.setTimeout(() => {
-			this.indexTimer = null;
-			void this.writeVaultIndex();
-		}, 1000);
-	}
-
-	private async writeVaultIndex() {
-		try {
-			await this.app.vault.adapter.write(
-				`${this.manifest.dir}/vault-index.json`,
-				JSON.stringify(this.vaultFileIndex()),
-			);
-		} catch (error) {
-			console.warn("[marimo] failed to write vault index", error);
-		}
-	}
-
 	private patchWorkerForPyodide() {
 		if (this.workerPatched) {
 			return;
@@ -718,7 +674,6 @@ export default class MarimoPlugin extends Plugin {
 							"try{delete globalThis.process}catch(e){}" +
 							"globalThis.process=undefined;" +
 							plugin.workerGlobals +
-							plugin.vaultFilesGlobal() +
 							// A dedicated channel for vault traffic, so it
 							// never shares marimo's own RPC channel. Python
 							// reaches port1 through the worker global; port2

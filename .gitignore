@@ -6,9 +6,6 @@ main.js
 # regenerate with scripts/vendor-islands.sh
 vendor/
 
-# written at runtime by the plugin (through the demo-vault plugin symlink)
-vault-index.json
-
 # demo vault session state (plugin symlink is recreated by scripts/open-vault.sh)
 examples/demo-vault/.obsidian/plugins/
 examples/demo-vault/.obsidian/workspace.json
