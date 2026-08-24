@@ -299,7 +299,12 @@ export default class MarimoPlugin extends Plugin {
 			return;
 		}
 
-		const wrapper = el.createDiv({ cls: "marimo-island-block" });
+		// The `marimo` class is the runtime's hook for an embedded container.
+		// Its stylesheet declares every color variable on `:root, .marimo`,
+		// so without it the variables exist only on the document root, where
+		// the runtime's own stylesheet pins a light color scheme and the
+		// light branch of every light-dark() wins.
+		const wrapper = el.createDiv({ cls: "marimo-island-block marimo" });
 		this.syncIslandTheme(wrapper);
 
 		// Built via innerHTML on purpose: once the runtime has defined the
