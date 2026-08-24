@@ -2,6 +2,22 @@
  * Vault RPC dispatcher for requests from Python over MessagePort.
  */
 
+export interface NoteEntry {
+	path: string;
+	name: string;
+	folder: string;
+	size: number;
+	ctime: number;
+	mtime: number;
+	frontmatter: Record<string, unknown>;
+	tags: string[];
+	headings: Array<{ heading: string; level: number }>;
+	links: Array<{ link: string; target: string | null }>;
+	unresolved: string[];
+	tasks: Array<{ done: boolean; line: number }>;
+	blocks: string[];
+}
+
 export type ErrorCode =
 	| "unknown_op"
 	| "invalid_path"
@@ -43,6 +59,7 @@ type Response = SuccessResponse | ErrorResponse;
  */
 export interface VaultRpcHost {
 	getFiles(): Array<{ path: string; ext: string; size: number; mtime: number }>;
+	getNotes(folder?: string, tag?: string): Promise<NoteEntry[]>;
 }
 
 export class VaultRpc {
@@ -100,6 +117,10 @@ export class VaultRpc {
 			return this.opFiles(request);
 		}
 
+		if (op === "notes") {
+			return await this.opNotes(request);
+		}
+
 		throw new VaultRpcError("unknown_op", `Unknown operation: ${op}`);
 	}
 
@@ -125,6 +146,29 @@ export class VaultRpc {
 		const wanted = ext.replace(/^\./, "").toLowerCase();
 
 		return files.filter((f) => f.ext.toLowerCase() === wanted);
+	}
+
+	private async opNotes(request: Request): Promise<unknown> {
+		const folder = request.folder;
+		const tag = request.tag;
+
+		if (
+			folder !== undefined &&
+			folder !== null &&
+			typeof folder !== "string"
+		) {
+			throw new VaultRpcError("invalid_arg", "folder must be a string");
+		}
+
+		if (
+			tag !== undefined &&
+			tag !== null &&
+			typeof tag !== "string"
+		) {
+			throw new VaultRpcError("invalid_arg", "tag must be a string");
+		}
+
+		return await this.host.getNotes(folder || undefined, tag || undefined);
 	}
 
 	private sendResponse(response: Response): void {

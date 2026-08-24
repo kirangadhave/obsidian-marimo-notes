@@ -6,6 +6,7 @@ Provided by the obsidian-marimo plugin. Usage:
 
     text = await vault.read("some note.md")
     files = await vault.files()
+    notes = await vault.notes()
 """
 
 import asyncio
@@ -29,6 +30,87 @@ class VaultError(Exception):
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}")
+
+
+class Note:
+    """A markdown note in the vault with its metadata."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        """Initialize a Note from metadata dict.
+
+        Args:
+            data (dict): Metadata dict from the vault API.
+        """
+        self._data = data
+
+    @property
+    def path(self) -> str:
+        """Vault path to this note."""
+        return self._data["path"]
+
+    @property
+    def name(self) -> str:
+        """Basename of this note, without extension."""
+        return self._data["name"]
+
+    @property
+    def folder(self) -> str:
+        """Parent folder path, or empty string at vault root."""
+        return self._data["folder"]
+
+    @property
+    def size(self) -> int:
+        """File size in bytes."""
+        return self._data["size"]
+
+    @property
+    def ctime(self) -> int:
+        """Creation time as milliseconds since epoch."""
+        return self._data["ctime"]
+
+    @property
+    def mtime(self) -> int:
+        """Last modification time as milliseconds since epoch."""
+        return self._data["mtime"]
+
+    @property
+    def frontmatter(self) -> dict[str, Any]:
+        """Frontmatter dictionary, or empty dict when absent."""
+        return self._data["frontmatter"]
+
+    @property
+    def tags(self) -> list[str]:
+        """List of tags, merged from inline and frontmatter."""
+        return self._data["tags"]
+
+    @property
+    def headings(self) -> list[dict[str, Any]]:
+        """List of headings, each with 'heading' (str) and 'level' (int)."""
+        return self._data["headings"]
+
+    @property
+    def links(self) -> list[dict[str, Any]]:
+        """List of links, each with 'link' (raw text) and 'target' (resolved path or null)."""
+        return self._data["links"]
+
+    @property
+    def unresolved(self) -> list[str]:
+        """Raw linktexts that did not resolve to a file."""
+        return self._data["unresolved"]
+
+    @property
+    def tasks(self) -> list[dict[str, Any]]:
+        """List of tasks, each with 'done' (bool) and 'line' (int)."""
+        return self._data["tasks"]
+
+    @property
+    def blocks(self) -> list[str]:
+        """List of block IDs in this note."""
+        return self._data["blocks"]
+
+    def __repr__(self) -> str:
+        """Return a string representation."""
+        return f"Note(path={self.path!r})"
 
 
 class _VaultPort:
@@ -140,6 +222,7 @@ class Vault:
         #: The vault root as an app:// URL.
         self.base: str = str(js.__VAULT_BASE__)
         self._port = _VaultPort()
+        self._notes_cache: list[Note] | None = None
 
     async def read(self, path: str) -> str:
         """Return the current text content of a vault file."""
@@ -168,6 +251,45 @@ class Vault:
         if ext is not None:
             kwargs["ext"] = ext
         return await self._port._call("files", **kwargs)
+
+    async def notes(
+        self, folder: str | None = None, tag: str | None = None
+    ) -> list[Note]:
+        """Query the vault's markdown notes with metadata.
+
+        Args:
+            folder (str | None, optional): Filter by folder path prefix.
+                A trailing slash is optional. Comparison is exact.
+                If not provided, notes from all folders are returned.
+            tag (str | None, optional): Filter by tag. A leading hash is
+                optional. Comparison is case-insensitive, matching Obsidian
+                behavior. If not provided, all notes are returned.
+
+        Returns:
+            A list of Note objects, sorted by path. Each Note wraps metadata
+            from the vault cache: path, name, folder, size, ctime, mtime,
+            frontmatter, tags, headings, links, unresolved, tasks, blocks.
+
+        Raises:
+            VaultError: If the operation fails or arguments are invalid.
+        """
+        kwargs = {}
+        if folder is not None:
+            kwargs["folder"] = folder
+        if tag is not None:
+            kwargs["tag"] = tag
+
+        if not kwargs:
+            if self._notes_cache is not None:
+                return self._notes_cache
+
+        response = await self._port._call("notes", **kwargs)
+        notes = [Note(item) for item in response]
+
+        if not kwargs:
+            self._notes_cache = notes
+
+        return notes
 
 
 vault = Vault()

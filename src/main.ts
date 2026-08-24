@@ -1,4 +1,5 @@
 import {
+	getAllTags,
 	MarkdownPostProcessorContext,
 	Notice,
 	Plugin,
@@ -7,7 +8,7 @@ import {
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
 import { MARIMO_MD_FENCE, marimoFenceField } from "./live-preview";
-import { VaultRpc, type VaultRpcHost } from "./vault-rpc";
+import { VaultRpc, type VaultRpcHost, type NoteEntry } from "./vault-rpc";
 
 /**
  * Pin the islands runtime to a marimo release. The runtime resolves its own
@@ -65,8 +66,11 @@ export default class MarimoPlugin extends Plugin {
 	private bootStageTs = Date.now();
 	private bootError: string | null = null;
 	private vaultRpc: VaultRpc | null = null;
+	private metadataCacheResolved: Promise<void> | null = null;
 
 	async onload() {
+		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
+
 		// Both fence flavors — ```marimo and ```python {.marimo} — share one
 		// pipeline: this post-processor in reading view, the editor extension
 		// below in live preview. No code-block processor: registering one
@@ -605,6 +609,8 @@ export default class MarimoPlugin extends Plugin {
 						size: f.stat.size,
 						mtime: f.stat.mtime,
 					})),
+				getNotes: async (folder?: string, tag?: string) =>
+					await this.buildNotes(folder, tag),
 			};
 			this.vaultRpc = new VaultRpc(data.port, host);
 			return;
@@ -714,6 +720,156 @@ export default class MarimoPlugin extends Plugin {
 			window.Worker = NativeWorker;
 		});
 		this.workerPatched = true;
+	}
+
+	private isCacheResolved(): boolean {
+		const files = this.app.vault.getMarkdownFiles();
+		const resolved = this.app.metadataCache.resolvedLinks;
+		return files.every((f) => f.path in resolved);
+	}
+
+	private async waitForMetadataCacheResolved(): Promise<void> {
+		if (this.isCacheResolved()) {
+			return;
+		}
+
+		return new Promise<void>((resolve) => {
+			let timer = 0;
+			const eventRef = this.app.metadataCache.on("resolved", () => {
+				if (this.isCacheResolved()) {
+					this.app.metadataCache.offref(eventRef);
+					window.clearTimeout(timer);
+					resolve();
+				}
+			});
+
+			// An answer from a half-built cache beats a call that never
+			// returns, so give up waiting rather than block the notebook.
+			timer = window.setTimeout(() => {
+				this.app.metadataCache.offref(eventRef);
+				console.warn(
+					"[marimo] metadata cache did not resolve in time, answering anyway",
+				);
+				resolve();
+			}, 30_000);
+		});
+	}
+
+	private async buildNotes(folder?: string, tag?: string): Promise<NoteEntry[]> {
+		await this.metadataCacheResolved;
+
+		const notes: NoteEntry[] = [];
+
+		const files = this.app.vault.getMarkdownFiles();
+		const normalizedFolder = folder ? folder.replace(/\/$/, "") : "";
+		const normalizedTag = tag ? tag.replace(/^#/, "").toLowerCase() : "";
+
+		for (const file of files) {
+			if (normalizedFolder) {
+				if (!file.path.startsWith(normalizedFolder + "/") &&
+					file.path !== normalizedFolder) {
+					continue;
+				}
+			}
+
+			const cache = this.app.metadataCache.getFileCache(file);
+
+			const allTags = cache ? (getAllTags(cache) || []) : [];
+			const normalizedTags = new Set(
+				allTags.map((t) => t.replace(/^#/, "").toLowerCase())
+			);
+
+			if (normalizedTag && !normalizedTags.has(normalizedTag)) {
+				continue;
+			}
+
+			let frontmatter: Record<string, unknown> = {};
+			if (cache?.frontmatter) {
+				try {
+					frontmatter = JSON.parse(JSON.stringify(cache.frontmatter));
+				} catch {
+					// User frontmatter can be arbitrary YAML with cyclic values.
+				}
+			}
+
+			const headings = (cache?.headings || []).map((h) => ({
+				heading: h.heading,
+				level: h.level,
+			}));
+
+			const linksArray: Array<{ link: string; target: string | null }> = [];
+			const unresolvedSet = new Set<string>();
+
+			if (cache) {
+				const allLinks = [
+					...(cache.links || []),
+					...(cache.embeds || []),
+					...(cache.frontmatterLinks || []),
+				];
+
+				for (const linkItem of allLinks) {
+					// Resolver takes linkpath, not full linktext with anchor/block suffix.
+					const linkText = linkItem.link.split(/[#^]/)[0];
+
+					if (!linkText) {
+						continue;
+					}
+
+					const target = this.app.metadataCache.getFirstLinkpathDest(
+						linkText,
+						file.path,
+					);
+
+					linksArray.push({
+						link: linkItem.link,
+						target: target ? target.path : null,
+					});
+
+					if (!target) {
+						unresolvedSet.add(linkItem.link);
+					}
+				}
+			}
+
+			const tasks: Array<{ done: boolean; line: number }> = [];
+			if (cache?.listItems) {
+				for (const item of cache.listItems) {
+					if (item.task !== undefined) {
+						tasks.push({
+							done: item.task !== " ",
+							line: item.position.start.line,
+						});
+					}
+				}
+			}
+
+			const blocks = cache?.blocks
+				? Object.keys(cache.blocks)
+				: [];
+
+			// Obsidian names the root folder "/", which is not a prefix any
+			// caller writes. Report the root as an empty path instead.
+			const parent = file.parent?.path ?? "";
+			const parentFolder = parent === "/" ? "" : parent;
+
+			notes.push({
+				path: file.path,
+				name: file.basename,
+				folder: parentFolder,
+				size: file.stat.size,
+				ctime: file.stat.ctime,
+				mtime: file.stat.mtime,
+				frontmatter,
+				tags: allTags,
+				headings,
+				links: linksArray,
+				unresolved: Array.from(unresolvedSet),
+				tasks,
+				blocks,
+			});
+		}
+
+		return notes.sort((a, b) => a.path.localeCompare(b.path));
 	}
 }
 
