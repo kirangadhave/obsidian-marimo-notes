@@ -197,6 +197,7 @@ export default class MarimoPlugin extends Plugin {
 	private metadataCacheResolved: Promise<void> | null = null;
 	private appIdToPath = new Map<string, string>();
 	private currentLiveAppId: string | null = null;
+	private themeSheet = new CSSStyleSheet();
 
 	async onload() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -210,6 +211,7 @@ export default class MarimoPlugin extends Plugin {
 		this.addSettingTab(new MarimoSettingTab(this.app, this));
 
 		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
+		this.syncIslandTheme();
 		this.watchVaultEvents();
 
 		// Both fence flavors — ```marimo and ```python {.marimo} — share one
@@ -331,6 +333,9 @@ export default class MarimoPlugin extends Plugin {
 	 */
 	private syncIslandTheme(target?: HTMLElement) {
 		const dark = document.body.hasClass("theme-dark");
+		this.themeSheet.replaceSync(
+			`:host{color-scheme:${dark ? "dark" : "light"}}`,
+		);
 		const blocks = target
 			? [target]
 			: Array.from(
@@ -648,8 +653,22 @@ export default class MarimoPlugin extends Plugin {
 					sheet.replaceSync("");
 				}
 			}
+			this.adoptThemeSheet(sr);
 			this.scrubShadowStyles(sr);
 		}
+	}
+
+	/**
+	 * Carries the theme into a widget's shadow tree. Inheritance from the
+	 * host is supposed to be enough, and a rule written outside cannot select
+	 * into a shadow tree at all, so `:host` from inside is the one reliable
+	 * way to state the scheme where marimo resolves its colors.
+	 */
+	private adoptThemeSheet(sr: ShadowRoot) {
+		if (sr.adoptedStyleSheets.includes(this.themeSheet)) {
+			return;
+		}
+		sr.adoptedStyleSheets = [...sr.adoptedStyleSheets, this.themeSheet];
 	}
 
 	private allIslands(): HTMLElement[] {
