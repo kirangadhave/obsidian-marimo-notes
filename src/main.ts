@@ -8,7 +8,12 @@ import {
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
 import { MARIMO_MD_FENCE, marimoFenceField } from "./live-preview";
-import { VaultRpc, type VaultRpcHost, type NoteEntry } from "./vault-rpc";
+import {
+	VaultRpc,
+	type LinkGraph,
+	type NoteEntry,
+	type VaultRpcHost,
+} from "./vault-rpc";
 
 /**
  * Pin the islands runtime to a marimo release. The runtime resolves its own
@@ -611,6 +616,7 @@ export default class MarimoPlugin extends Plugin {
 					})),
 				getNotes: async (folder?: string, tag?: string) =>
 					await this.buildNotes(folder, tag),
+				getLinks: async () => await this.buildLinks(),
 			};
 			this.vaultRpc = new VaultRpc(data.port, host);
 			return;
@@ -870,6 +876,27 @@ export default class MarimoPlugin extends Plugin {
 		}
 
 		return notes.sort((a, b) => a.path.localeCompare(b.path));
+	}
+
+	private async buildLinks(): Promise<LinkGraph> {
+		await this.metadataCacheResolved;
+
+		const resolved: Record<string, Record<string, number>> = {};
+		const unresolved: Record<string, Record<string, number>> = {};
+
+		for (const [source, links] of Object.entries(
+			this.app.metadataCache.resolvedLinks,
+		)) {
+			resolved[source] = { ...links };
+		}
+
+		for (const [source, links] of Object.entries(
+			this.app.metadataCache.unresolvedLinks,
+		)) {
+			unresolved[source] = { ...links };
+		}
+
+		return { resolved, unresolved };
 	}
 }
 

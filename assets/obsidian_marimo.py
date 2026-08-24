@@ -223,6 +223,8 @@ class Vault:
         self.base: str = str(js.__VAULT_BASE__)
         self._port = _VaultPort()
         self._notes_cache: list[Note] | None = None
+        self._links_cache: dict[str, Any] | None = None
+        self._backlinks_cache: dict[str, list[str]] | None = None
 
     async def read(self, path: str) -> str:
         """Return the current text content of a vault file."""
@@ -290,6 +292,53 @@ class Vault:
             self._notes_cache = notes
 
         return notes
+
+    async def links(self) -> dict[str, Any]:
+        """Query the vault's forward link graph.
+
+        Returns:
+            A dict with keys "resolved" and "unresolved", each mapping a
+            source path to a dict of destination path to link count. Resolved
+            links point to existing vault files. Unresolved links point to
+            names not found in the vault.
+
+        Raises:
+            VaultError: If the operation fails or times out.
+        """
+        if self._links_cache is not None:
+            return self._links_cache
+
+        response = await self._port._call("links")
+        self._links_cache = response
+
+        return response
+
+    async def backlinks(self, path: str) -> list[str]:
+        """Query the vault's backlink graph for a note.
+
+        Args:
+            path (str): Vault path to the note.
+
+        Returns:
+            A list of source paths that link to this path, sorted
+            alphabetically. Only resolved links count, because an unresolved
+            link points at no file.
+
+        Raises:
+            VaultError: If the operation fails or times out.
+        """
+        if self._backlinks_cache is None:
+            links_graph = await self.links()
+            self._backlinks_cache = {}
+
+            for source, destinations in links_graph.get("resolved", {}).items():
+                for dest in destinations:
+                    self._backlinks_cache.setdefault(dest, []).append(source)
+
+            for sources in self._backlinks_cache.values():
+                sources.sort()
+
+        return list(self._backlinks_cache.get(path, []))
 
 
 vault = Vault()

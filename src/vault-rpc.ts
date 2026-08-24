@@ -57,9 +57,19 @@ type Response = SuccessResponse | ErrorResponse;
  * dispatcher needs from the host. Isolates the protocol from the broader
  * plugin interface.
  */
+/**
+ * The forward link graph. Each map goes from a source path to a map of
+ * destination to link count.
+ */
+export interface LinkGraph {
+	resolved: Record<string, Record<string, number>>;
+	unresolved: Record<string, Record<string, number>>;
+}
+
 export interface VaultRpcHost {
 	getFiles(): Array<{ path: string; ext: string; size: number; mtime: number }>;
 	getNotes(folder?: string, tag?: string): Promise<NoteEntry[]>;
+	getLinks(): Promise<LinkGraph>;
 }
 
 export class VaultRpc {
@@ -119,6 +129,10 @@ export class VaultRpc {
 
 		if (op === "notes") {
 			return await this.opNotes(request);
+		}
+
+		if (op === "links") {
+			return await this.host.getLinks();
 		}
 
 		throw new VaultRpcError("unknown_op", `Unknown operation: ${op}`);
