@@ -1,11 +1,14 @@
 # Vault stats — a meta notebook
 
-This notebook analyzes **the vault itself**, using the plugin's `obsidian`
-Python module:
+This notebook analyzes **the vault itself**, using the plugin's
+`obsidian_marimo` module:
 
 - `vault.base` — the vault's `app://` URL
 - `await vault.read(path)` — text of any vault file, always fresh
-- `await vault.files()` — live index of markdown notes (path, size, mtime)
+- `await vault.files(ext="md")` — every file of one type (path, ext, size, mtime)
+
+`vault.files()` with no argument lists every file in the vault, attachments
+included, so this notebook asks for markdown only.
 
 ## Refresh control
 
@@ -27,7 +30,7 @@ from datetime import datetime
 refresh.value  # rerun on refresh
 
 notes = []
-for f in await vault.files():
+for f in await vault.files(ext="md"):
     text = await vault.read(f["path"])
     notes.append({
         "note": f["path"].removesuffix(".md"),
