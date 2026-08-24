@@ -57,3 +57,4 @@ mo.stop(not record.value)
 await vault.append("data/log.txt", f"recorded from {me.path}\n")
 mo.md("Written to `data/log.txt`.")
 ```
+

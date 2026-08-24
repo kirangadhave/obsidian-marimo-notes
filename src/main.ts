@@ -567,9 +567,16 @@ export default class MarimoPlugin extends Plugin {
 	 * rebuild consumed islands from the code retained in data-mo-code.
 	 * replaceWith cleanly unmounts the old element's React root via its
 	 * disconnectedCallback.
+	 *
+	 * Only reactive islands qualify. A rebuilt island shows the loader until
+	 * the runtime binds it, and the runtime binds reactive islands only, so
+	 * rebuilding any other island would replace real output with a loader
+	 * that nothing ever clears. The islands of a note the user is only
+	 * looking at keep the rendering they already have, which is what makes
+	 * them a static snapshot.
 	 */
 	private restoreConsumedIslands() {
-		for (const el of this.allIslands()) {
+		for (const el of this.reactiveIslands()) {
 			const appId = el.getAttribute("data-app-id");
 			const code = el.getAttribute("data-mo-code");
 			if (!appId || !code || el.querySelector("marimo-cell-code")) {
@@ -582,10 +589,7 @@ export default class MarimoPlugin extends Plugin {
 				this.loaderText(),
 			);
 			const fresh = host.firstElementChild as HTMLElement;
-			fresh.setAttribute(
-				"data-reactive",
-				el.getAttribute("data-reactive") ?? "false",
-			);
+			fresh.setAttribute("data-reactive", "true");
 			el.replaceWith(fresh);
 		}
 	}
