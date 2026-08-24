@@ -277,6 +277,33 @@ class _VaultPort:
             self.pending.pop(msg_id, None)
 
 
+async def _load_pandas() -> Any:
+    """Import pandas, installing it into the kernel on first use.
+
+    Returns:
+        The pandas module.
+
+    Raises:
+        VaultError: If the install fails, which happens offline.
+    """
+    try:
+        import pandas
+    except ImportError:
+        try:
+            import micropip
+
+            await micropip.install("pandas")
+            import pandas
+        except Exception as err:
+            raise VaultError(
+                "missing_dependency",
+                f"pandas is not available and the install failed: {err}. "
+                "Add `import pandas as pd` to a cell and reload the note, "
+                "which makes marimo install it at startup.",
+            ) from None
+    return pandas
+
+
 class Vault:
     """Reads and writes the vault this notebook lives in."""
 
@@ -618,23 +645,25 @@ class Vault:
     async def frame(self) -> Any:
         """Return all notes as a pandas DataFrame.
 
+        Frontmatter keys become columns prefixed with "fm_", so a key named
+        path or tags cannot collide with a built-in column. The built-in
+        columns are path, name, folder, size, ctime, mtime, tags, headings,
+        links, unresolved, tasks, and blocks.
+
+        Pyodide does not preload pandas, and marimo installs only the
+        packages it finds in the notebook source. This module reaches the
+        kernel as an exec'd string, so that scan never sees the import here.
+        The first call therefore installs pandas itself, which takes several
+        seconds. A notebook that never asks for a frame never pays for it.
+
         Returns:
-            A DataFrame with one row per note. Frontmatter keys appear as
-            columns, prefixed with "fm_" to avoid collisions. Built-in columns
-            include path, name, folder, size, ctime, mtime, tags, headings,
-            links, unresolved, tasks, blocks.
+            A DataFrame with one row per note.
 
         Raises:
-            VaultError: If pandas is not installed (code: io_error).
+            VaultError: If pandas is missing and the install fails, with code
+                missing_dependency.
         """
-        try:
-            import pandas as pd
-        except ImportError:
-            raise VaultError(
-                "io_error",
-                "pandas is not installed. Install it with micropip: "
-                "await __import__('micropip').install('pandas')",
-            ) from None
+        pd = await _load_pandas()
 
         raw_entries = await self._raw_notes()
 

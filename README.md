@@ -153,9 +153,16 @@ await vault.tasks(done=False)                # only open checkboxes
 df = await vault.frame()                     # one row per note as DataFrame
 ```
 
-`frame()` needs pandas, which Pyodide does not preload. If pandas is missing,
-the call raises `VaultError` with code `io_error` and a message that names the
-`micropip` command to install it.
+`frame()` needs pandas, which Pyodide does not preload. The first call
+installs it into the running kernel, which takes several seconds. A notebook
+that never calls `frame()` never pays that cost. If the install fails, which
+happens when you are offline, the call raises `VaultError` with code
+`missing_dependency`.
+
+To move the cost to notebook startup instead, put `import pandas as pd` in a
+cell. marimo installs the packages it finds in the notebook source while the
+kernel boots. It cannot find the import inside `frame()`, because this module
+reaches the kernel as a string.
 
 The DataFrame carries one column per built-in field and one column per
 frontmatter key found anywhere in the vault. A frontmatter column is prefixed

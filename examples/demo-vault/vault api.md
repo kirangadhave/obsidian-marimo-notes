@@ -19,8 +19,9 @@ mo.md(f"**{len(notes)}** notes, **{len(tagged)}** of them tagged")
 
 ## A table of everything
 
-`vault.frame()` builds one row per note. Pyodide does not preload pandas, so
-the cell reports the problem instead of failing when pandas is absent.
+`vault.frame()` builds one row per note. The first call installs pandas into
+the kernel, so it takes a few seconds. The guard keeps the note readable when
+the install cannot run.
 
 ```marimo
 try:
