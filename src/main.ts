@@ -1,9 +1,13 @@
 import {
+	App,
+	FileSystemAdapter,
 	getAllTags,
 	MarkdownPostProcessorContext,
 	Notice,
 	Plugin,
+	PluginSettingTab,
 	requestUrl,
+	Setting,
 	TFile,
 } from "obsidian";
 import marimoLogo from "../assets/marimo-logo.png";
@@ -25,6 +29,14 @@ import {
 const ISLANDS_VERSION = "0.24.0";
 const CDN_BASE = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VERSION}/dist`;
 
+interface MarimoPluginSettings {
+	allowSymlinks: boolean;
+}
+
+const DEFAULT_SETTINGS: MarimoPluginSettings = {
+	allowSymlinks: false,
+};
+
 interface IslandsRuntime {
 	initialize(): Promise<void>;
 	stopApp?(appId?: string): Promise<void>;
@@ -36,6 +48,111 @@ const dynamicImport = new Function(
 	"url",
 	"return import(url)",
 ) as (url: string) => Promise<IslandsRuntime>;
+
+/**
+ * Checks symlink containment on desktop, with graceful degradation to no-op
+ * on mobile (where symlinks are not creatable inside the app sandbox).
+ * Caches results per parent folder.
+ */
+class SymlinkChecker {
+	private cache = new Map<string, boolean>();
+	private vaultBasePath: string;
+	private allowSymlinks: boolean;
+	private fs: typeof import("fs") | null = null;
+	private path: typeof import("path") | null = null;
+
+	constructor(vaultBasePath: string, allowSymlinks: boolean) {
+		this.vaultBasePath = vaultBasePath;
+		this.allowSymlinks = allowSymlinks;
+		this.initNodeModules();
+	}
+
+	private initNodeModules(): void {
+		try {
+			// Dynamic requires avoid bundling these into the mobile build.
+			// esbuild.config.mjs externalizes all builtins, so require returns
+			// the module or undefined on mobile where Node is unavailable.
+			this.fs = require("fs");
+			this.path = require("path");
+		} catch {
+			// Mobile path: Node unavailable, no-op returns true.
+		}
+	}
+
+	check(normalizedPath: string): boolean {
+		if (this.allowSymlinks) {
+			return true;
+		}
+
+		// Node is absent on mobile, where the adapter is not a filesystem
+		// adapter and the app sandbox cannot hold a symlink in the first
+		// place. Nothing to contain, so nothing to check.
+		if (!this.fs || !this.path || !this.vaultBasePath) {
+			return true;
+		}
+
+		const parentPath = this.path.dirname(normalizedPath);
+		const cached = this.cache.get(parentPath);
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		const result = this.checkPath(normalizedPath);
+		this.cache.set(parentPath, result);
+		return result;
+	}
+
+	private checkPath(normalizedPath: string): boolean {
+		if (!this.fs || !this.path) {
+			return true;
+		}
+
+		const fullPath = this.path.join(this.vaultBasePath, normalizedPath);
+		const parentPath = this.path.dirname(fullPath);
+
+		let ancestorPath = parentPath;
+		while (ancestorPath !== this.path.dirname(ancestorPath)) {
+			if (this.fs.existsSync(ancestorPath)) {
+				break;
+			}
+			ancestorPath = this.path.dirname(ancestorPath);
+		}
+
+		try {
+			return this.isContained(
+				this.fs.realpathSync(ancestorPath),
+				this.fs.realpathSync(this.vaultBasePath),
+			);
+		} catch {
+			// A path that cannot be resolved cannot be shown to be contained,
+			// and an unreadable answer must not become permission to write.
+			return false;
+		}
+	}
+
+	private isContained(ancestor: string, base: string): boolean {
+		if (!this.path) {
+			return false;
+		}
+		const relative = this.path.relative(base, ancestor);
+		// An empty result means the two are the same folder. A result that
+		// climbs, or that is absolute because the two sit on different
+		// Windows drives, means the target escaped the vault.
+		return (
+			relative === "" ||
+			(!relative.startsWith("..") && !this.path.isAbsolute(relative))
+		);
+	}
+
+	clearCache(): void {
+		this.cache.clear();
+	}
+
+	setAllowSymlinks(allow: boolean): void {
+		this.allowSymlinks = allow;
+		this.clearCache();
+	}
+}
 
 /** Obsidian's legacy CodeMirror mode registry (used for fence highlighting). */
 interface CodeMirrorLike {
@@ -61,6 +178,8 @@ if "obsidian_marimo" not in _sys.modules:
     _sys.modules["obsidian_marimo"] = _mod`;
 
 export default class MarimoPlugin extends Plugin {
+	settings: MarimoPluginSettings = DEFAULT_SETTINGS;
+	symlinkChecker: SymlinkChecker | null = null;
 	private runtime: Promise<IslandsRuntime> | null = null;
 	private styleEl: HTMLElement | null = null;
 	private initTimer: number | null = null;
@@ -78,6 +197,16 @@ export default class MarimoPlugin extends Plugin {
 	private currentLiveAppId: string | null = null;
 
 	async onload() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+
+		const adapter = this.app.vault.adapter;
+		this.symlinkChecker = new SymlinkChecker(
+			adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "",
+			this.settings.allowSymlinks,
+		);
+
+		this.addSettingTab(new MarimoSettingTab(this.app, this));
+
 		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
 		this.watchVaultEvents();
 
@@ -660,6 +789,12 @@ export default class MarimoPlugin extends Plugin {
 			"port" in data &&
 			data.port instanceof MessagePort
 		) {
+			const adapter = this.app.vault.adapter;
+			let vaultBasePath = "";
+			if (typeof (adapter as any).getBasePath === "function") {
+				vaultBasePath = (adapter as any).getBasePath();
+			}
+
 			const host: VaultRpcHost = {
 				getFiles: () =>
 					this.app.vault.getFiles().map((f) => ({
@@ -675,6 +810,8 @@ export default class MarimoPlugin extends Plugin {
 				getConfigDir: () => this.app.vault.configDir,
 				getAbstractFileByPath: (path: string) =>
 					this.app.vault.getAbstractFileByPath(path),
+				checkSymlinkContainment: (path: string) =>
+					this.symlinkChecker?.check(path) ?? false,
 			};
 			this.vaultRpc = new VaultRpc(data.port, host);
 			return;
@@ -986,13 +1123,18 @@ export default class MarimoPlugin extends Plugin {
 	 * Feeds vault changes to the notebook so its cached metadata does not go
 	 * stale. Watching starts only once the layout is ready, because the
 	 * initial vault scan would otherwise report every file as a creation.
+	 * Clearing the symlink cache belongs here too, because a folder can turn
+	 * into a symlink after the last check approved it.
 	 */
 	private watchVaultEvents(): void {
 		const record = (
 			kind: VaultEvent["kind"],
 			path: string,
 			oldPath?: string,
-		) => this.vaultRpc?.recordEvent(kind, path, oldPath);
+		) => {
+			this.vaultRpc?.recordEvent(kind, path, oldPath);
+			this.symlinkChecker?.clearCache();
+		};
 
 		this.app.workspace.onLayoutReady(() => {
 			this.registerEvent(
@@ -1106,4 +1248,31 @@ function appIdForPath(path: string): string {
 		hash = (hash * 31 + path.charCodeAt(i)) | 0;
 	}
 	return `note-${(hash >>> 0).toString(36)}`;
+}
+
+class MarimoSettingTab extends PluginSettingTab {
+	plugin: MarimoPlugin;
+
+	constructor(app: App, plugin: MarimoPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		new Setting(containerEl)
+			.setName("Allow writes through symlinked folders")
+			.setDesc(
+				"When disabled, writes to files accessed through symlinks are rejected. Enable this only if you have symlinks in your vault that you trust.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.allowSymlinks).onChange(async (value) => {
+					this.plugin.settings.allowSymlinks = value;
+					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.symlinkChecker?.setAllowSymlinks(value);
+				}),
+			);
+	}
 }

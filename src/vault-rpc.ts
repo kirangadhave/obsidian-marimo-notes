@@ -76,6 +76,7 @@ export interface VaultRpcHost {
 	getSelf(): Promise<NoteEntry | null>;
 	getConfigDir(): string;
 	getAbstractFileByPath(path: string): TAbstractFile | null;
+	checkSymlinkContainment(path: string): boolean;
 }
 
 /** One vault change, as the plugin observed it. */
@@ -270,6 +271,7 @@ export class VaultRpc {
 		return validatePath(request.path, {
 			configDir: this.host.getConfigDir(),
 			getAbstractFileByPath: (p) => this.host.getAbstractFileByPath(p),
+			checkSymlinkContainment: (p) => this.host.checkSymlinkContainment(p),
 		});
 	}
 

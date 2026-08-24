@@ -28,6 +28,8 @@ export interface PathValidatorHost {
 	/** Taken from `app.vault.configDir`, which the user can rename. */
 	configDir: string;
 	getAbstractFileByPath(path: string): TAbstractFile | null;
+	/** Reports whether the target stays inside the vault after symlinks resolve. */
+	checkSymlinkContainment(path: string): boolean;
 }
 
 /**
@@ -90,8 +92,15 @@ export function validatePath(path: unknown, host: PathValidatorHost): string {
 		);
 	}
 
-	// The symlink containment check belongs here, before the path reaches the
-	// filesystem.
+	// A symlinked folder inside the vault is a door out of it. Without this
+	// check a notebook writes anywhere the user account can reach, while
+	// every path above still looks like an ordinary vault path.
+	if (!host.checkSymlinkContainment(p)) {
+		throw new VaultRpcError(
+			"denied_symlink",
+			"Writes through symlinked folders are not allowed.",
+		);
+	}
 
 	if (host.getAbstractFileByPath(p) instanceof TFolder) {
 		throw new VaultRpcError("invalid_path", "The path names a folder.");
