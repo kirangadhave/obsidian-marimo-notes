@@ -526,6 +526,34 @@ class Vault:
         """
         return await self._port._call("exists", path=path)
 
+    async def append(self, path: str, text: str) -> None:
+        """Append text to a file in the vault.
+
+        Creates the file when it is missing. Appends accumulate in arrival
+        order and never coalesce, so no appended data is lost.
+
+        Args:
+            path (str): Vault path to append to.
+            text (str): The text to append.
+
+        Raises:
+            VaultError: If the operation fails or the path is invalid.
+        """
+        await self._port._call("append", path=path, data=text)
+
+    async def trash(self, path: str) -> None:
+        """Move a file to trash.
+
+        Respects the user's "Deleted files" setting. The API never hard-deletes.
+
+        Args:
+            path (str): Vault path to trash.
+
+        Raises:
+            VaultError: If the operation fails or the file is not found.
+        """
+        await self._port._call("trash", path=path)
+
     async def frame(self) -> Any:
         """Return all notes as a pandas DataFrame.
 

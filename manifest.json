@@ -2,7 +2,7 @@
 	"id": "marimo-islands",
 	"name": "marimo islands",
 	"version": "0.1.0",
-	"minAppVersion": "1.5.0",
+	"minAppVersion": "1.7.2",
 	"description": "Run marimo notebooks as live, reactive Python cells inside your notes. Python runs in-browser via Pyodide.",
 	"author": "Kiran Gadhave",
 	"authorUrl": "https://github.com/kirangadhave",

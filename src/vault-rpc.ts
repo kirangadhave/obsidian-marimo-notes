@@ -84,6 +84,8 @@ export interface VaultRpcHost {
 	createBinary(path: string, data: ArrayBuffer): Promise<void>;
 	modify(file: TAbstractFile, data: string): Promise<void>;
 	modifyBinary(file: TAbstractFile, data: ArrayBuffer): Promise<void>;
+	process(file: TFile, fn: (data: string) => string): Promise<string>;
+	trashFile(file: TAbstractFile): Promise<void>;
 	exists(path: string): Promise<boolean>;
 }
 
@@ -118,6 +120,7 @@ interface WriteEntry {
 	timer: number | null;
 	data: unknown;
 	isText: boolean;
+	kind: "write" | "append";
 	promise: Promise<void>;
 	resolve: (() => void) | null;
 	reject: ((err: Error) => void) | null;
@@ -247,6 +250,14 @@ export class VaultRpc {
 			return await this.opWrite(request);
 		}
 
+		if (op === "append") {
+			return await this.opAppend(request);
+		}
+
+		if (op === "trash") {
+			return await this.opTrash(request);
+		}
+
 		if (op === "exists") {
 			return await this.opExists(request);
 		}
@@ -315,16 +326,36 @@ export class VaultRpc {
 	private async opWrite(request: Request): Promise<void> {
 		const path = this.validateRequestPath(request);
 
-		const liveAppSourcePath = this.host.getLiveAppSourcePath();
-		if (liveAppSourcePath && path === liveAppSourcePath) {
-			throw new VaultRpcError(
-				"denied_self_write",
-				"Writing the note that hosts this notebook is not allowed.",
-			);
-		}
+		this.denySelfWrite(path);
 
 		const data = toWritable(request.data);
-		await this.queueWrite(path, data, typeof data === "string");
+		await this.queueWrite(path, data, typeof data === "string", "write");
+	}
+
+	private async opAppend(request: Request): Promise<void> {
+		const path = this.validateRequestPath(request);
+
+		this.denySelfWrite(path);
+
+		const data = request.data;
+		if (typeof data !== "string") {
+			throw new VaultRpcError("invalid_arg", "append requires a string.");
+		}
+
+		await this.queueWrite(path, data, true, "append");
+	}
+
+	private async opTrash(request: Request): Promise<void> {
+		const path = this.validateRequestPath(request);
+
+		this.denySelfWrite(path);
+
+		const file = this.host.getAbstractFileByPath(path);
+		if (!file) {
+			throw new VaultRpcError("not_found", `File not found: ${path}`);
+		}
+
+		await this.host.trashFile(file);
 	}
 
 	private async opExists(request: Request): Promise<boolean> {
@@ -335,6 +366,21 @@ export class VaultRpc {
 		}
 
 		return await this.host.exists(path);
+	}
+
+	/**
+	 * Changing the note that hosts the notebook re-renders it, which rebuilds
+	 * the island, which re-runs the cell, which changes it again. There is no
+	 * per-call override, because a hostile cell sets its own flags.
+	 */
+	private denySelfWrite(path: string): void {
+		const host = this.host.getLiveAppSourcePath();
+		if (host && path === host) {
+			throw new VaultRpcError(
+				"denied_self_write",
+				"The note that hosts this notebook is not writable from it.",
+			);
+		}
 	}
 
 	/** Every write-class operation takes its path from here, never raw. */
@@ -362,19 +408,37 @@ export class VaultRpc {
 
 	/**
 	 * The window is per path, so a write to one note never waits behind a
-	 * write to another. A newer value for the same path replaces the older
-	 * one, and both callers wait on the same promise.
+	 * write to another. For writes, a newer value replaces the older one.
+	 * For appends, values concatenate in arrival order. A write and append
+	 * do not mix: when the kind changes for a path, the pending entry flushes
+	 * immediately and the new kind queues separately. This ensures no appended
+	 * data is lost.
 	 */
-	private queueWrite(path: string, data: unknown, isText: boolean): Promise<void> {
+	private async queueWrite(
+		path: string,
+		data: unknown,
+		isText: boolean,
+		kind: "write" | "append",
+	): Promise<void> {
 		const existing = this.writeQueues.get(path);
-		if (existing) {
+		if (existing && existing.kind === kind) {
 			if (existing.timer !== null) {
 				window.clearTimeout(existing.timer);
 			}
-			existing.data = data;
+			// A newer whole-file value replaces the older one and loses
+			// nothing. A dropped append loses data, so appends accumulate.
+			existing.data =
+				kind === "append"
+					? (existing.data as string) + (data as string)
+					: data;
 			existing.isText = isText;
 			existing.timer = window.setTimeout(() => this.flushPath(path), 500);
 			return existing.promise;
+		}
+		if (existing) {
+			// The pending value has to land first, or the two kinds race for
+			// the same file.
+			await this.flushPath(path);
 		}
 
 		let resolve: (() => void) | null = null;
@@ -388,6 +452,7 @@ export class VaultRpc {
 			timer: window.setTimeout(() => this.flushPath(path), 500),
 			data,
 			isText,
+			kind,
 			promise,
 			resolve,
 			reject,
@@ -413,7 +478,11 @@ export class VaultRpc {
 			entry.timer = null;
 		}
 		try {
-			await this.performWrite(path, entry.data, entry.isText);
+			if (entry.kind === "append") {
+				await this.performAppend(path, entry.data as string);
+			} else {
+				await this.performWrite(path, entry.data, entry.isText);
+			}
 			entry.resolve?.();
 		} catch (error) {
 			entry.reject?.(error as Error);
@@ -425,21 +494,23 @@ export class VaultRpc {
 		await Promise.all(paths.map((path) => this.flushPath(path)));
 	}
 
+	private async ensureParentFolders(path: string): Promise<void> {
+		const parts = path.split("/");
+		for (let i = 0; i < parts.length - 1; i++) {
+			try {
+				await this.host.createFolder(parts.slice(0, i + 1).join("/"));
+			} catch {
+				// The folder already exists, which is the common case.
+			}
+		}
+	}
+
 	private async performWrite(
 		path: string,
 		data: unknown,
 		isText: boolean,
 	): Promise<void> {
-		const parts = path.split("/");
-
-		for (let i = 0; i < parts.length - 1; i++) {
-			const folderPath = parts.slice(0, i + 1).join("/");
-			try {
-				await this.host.createFolder(folderPath);
-			} catch {
-				// The folder already exists, which is the common case.
-			}
-		}
+		await this.ensureParentFolders(path);
 
 		const file = this.host.getAbstractFileByPath(path);
 
@@ -462,6 +533,19 @@ export class VaultRpc {
 			} else {
 				await this.host.createBinary(path, data as ArrayBuffer);
 			}
+		}
+	}
+
+	private async performAppend(path: string, text: string): Promise<void> {
+		await this.ensureParentFolders(path);
+
+		const file = this.host.getAbstractFileByPath(path);
+		if (file && !(file instanceof TFolder)) {
+			// A read-modify-write through the vault never races with an edit
+			// the user is making in an open editor.
+			await this.host.process(file as TFile, (data) => data + text);
+		} else {
+			await this.host.create(path, text);
 		}
 	}
 

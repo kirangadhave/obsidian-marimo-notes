@@ -833,6 +833,10 @@ export default class MarimoPlugin extends Plugin {
 					this.app.vault.modify(file as TFile, data),
 				modifyBinary: (file: TAbstractFile, data: ArrayBuffer) =>
 					this.app.vault.modifyBinary(file as TFile, data),
+				process: (file: TFile, fn: (data: string) => string) =>
+					this.app.vault.process(file, fn),
+				trashFile: (file: TAbstractFile) =>
+					this.app.fileManager.trashFile(file),
 				exists: (path: string) => this.app.vault.adapter.exists(path),
 			};
 			this.vaultRpc = new VaultRpc(data.port, host);
