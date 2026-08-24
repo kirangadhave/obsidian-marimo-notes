@@ -7,6 +7,7 @@ import {
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
 import { MARIMO_MD_FENCE, marimoFenceField } from "./live-preview";
+import { VaultRpc } from "./vault-rpc";
 
 /**
  * Pin the islands runtime to a marimo release. The runtime resolves its own
@@ -64,6 +65,7 @@ export default class MarimoPlugin extends Plugin {
 	private bootStage = 0;
 	private bootStageTs = Date.now();
 	private bootError: string | null = null;
+	private vaultRpc: VaultRpc | null = null;
 
 	async onload() {
 		// Both fence flavors — ```marimo and ```python {.marimo} — share one
@@ -600,8 +602,20 @@ export default class MarimoPlugin extends Plugin {
 		this.updateLoaderTexts();
 	}
 
-	/** Observes worker→page RPC traffic to advance the boot stage. */
+	/** Observes worker messages to claim the vault RPC port and advance the boot stage. */
 	private onWorkerMessage(data: unknown) {
+		if (
+			data &&
+			typeof data === "object" &&
+			"op" in data &&
+			data.op === "__vault_port" &&
+			"port" in data &&
+			data.port instanceof MessagePort
+		) {
+			this.vaultRpc = new VaultRpc(data.port);
+			return;
+		}
+
 		if (this.bootStage >= 3 && !this.bootError) {
 			return;
 		}
@@ -704,7 +718,17 @@ export default class MarimoPlugin extends Plugin {
 							"try{delete globalThis.process}catch(e){}" +
 							"globalThis.process=undefined;" +
 							plugin.workerGlobals +
-							plugin.vaultFilesGlobal();
+							plugin.vaultFilesGlobal() +
+							// A dedicated channel for vault traffic, so it
+							// never shares marimo's own RPC channel. Python
+							// reaches port1 through the worker global; port2
+							// is transferred to the page, which is the only
+							// way a port crosses a worker boundary.
+							"(function(){" +
+							"var c=new MessageChannel();" +
+							"globalThis.__VAULT_PORT1__=c.port1;" +
+							"globalThis.postMessage({op:'__vault_port',port:c.port2},[c.port2]);" +
+							"})();";
 						const shim = [
 							`import ${JSON.stringify(
 								`data:text/javascript;charset=utf-8,${encodeURIComponent(prelude)}`,
