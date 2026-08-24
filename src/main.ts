@@ -249,6 +249,12 @@ export default class MarimoPlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => this.scheduleInitialize()),
 		);
+
+		// A theme switch changes no island, so the mirrored class would keep
+		// the theme the island was built under until something rebuilds it.
+		this.registerEvent(
+			this.app.workspace.on("css-change", () => this.syncIslandTheme()),
+		);
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", () => {
 				void this.stopOutgoingApp();
@@ -292,9 +298,7 @@ export default class MarimoPlugin extends Plugin {
 		}
 
 		const wrapper = el.createDiv({ cls: "marimo-island-block" });
-		// marimo's stylesheet keys dark mode off a Tailwind-style `.dark`
-		// ancestor; mirror Obsidian's theme onto the island container.
-		wrapper.classList.toggle("dark", document.body.hasClass("theme-dark"));
+		this.syncIslandTheme(wrapper);
 
 		// Built via innerHTML on purpose: once the runtime has defined the
 		// marimo-island custom element, document.createElement() would run its
@@ -310,6 +314,24 @@ export default class MarimoPlugin extends Plugin {
 			this.loaderText(),
 		);
 		this.scheduleInitialize();
+	}
+
+	/**
+	 * marimo's stylesheet keys dark mode off a Tailwind-style `.dark`
+	 * ancestor, so Obsidian's theme has to be mirrored onto every island
+	 * container. Called with no argument, it re-syncs every container, which
+	 * is what a theme switch needs.
+	 */
+	private syncIslandTheme(target?: HTMLElement) {
+		const dark = document.body.hasClass("theme-dark");
+		const blocks = target
+			? [target]
+			: Array.from(
+					document.querySelectorAll<HTMLElement>(".marimo-island-block"),
+				);
+		for (const block of blocks) {
+			block.classList.toggle("dark", dark);
+		}
 	}
 
 	/**
