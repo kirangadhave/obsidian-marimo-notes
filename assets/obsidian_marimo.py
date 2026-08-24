@@ -17,6 +17,13 @@ from pyodide.ffi import create_proxy, to_js
 from pyodide.http import pyfetch
 
 
+class _Unset:
+    """Sentinel value to unset a frontmatter key."""
+
+    def __repr__(self) -> str:
+        return "vault.UNSET"
+
+
 class VaultError(Exception):
     """Error from a vault operation."""
 
@@ -30,6 +37,9 @@ class VaultError(Exception):
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}")
+
+
+_UNSET = _Unset()
 
 
 class Note:
@@ -131,6 +141,18 @@ class Note:
             VaultError: If the write fails.
         """
         await self._vault.write(self.path, text)
+
+    async def set_frontmatter(self, frontmatter: dict[str, Any]) -> None:
+        """Merge frontmatter into this note.
+
+        Args:
+            frontmatter (dict): Key-value pairs to merge. Use vault.UNSET as a
+                value to remove a key.
+
+        Raises:
+            VaultError: If the operation fails.
+        """
+        await self._vault.set_frontmatter(self.path, frontmatter)
 
     def __repr__(self) -> str:
         """Return a string representation."""
@@ -256,7 +278,10 @@ class _VaultPort:
 
 
 class Vault:
-    """Reads files from the vault this notebook lives in."""
+    """Reads and writes the vault this notebook lives in."""
+
+    #: Assign this to a frontmatter key to remove it.
+    UNSET = _UNSET
 
     def __init__(self) -> None:
         #: The vault root as an app:// URL.
@@ -553,6 +578,42 @@ class Vault:
             VaultError: If the operation fails or the file is not found.
         """
         await self._port._call("trash", path=path)
+
+    async def set_frontmatter(self, path: str, frontmatter: dict[str, Any]) -> None:
+        """Merge frontmatter into a note.
+
+        Merges the given key-value pairs into the note's frontmatter. Keys not
+        mentioned are untouched. Use vault.UNSET as a value to remove a key.
+        The file must exist.
+
+        Args:
+            path (str): Vault path to the note.
+            frontmatter (dict): Key-value pairs to merge. A value of
+                vault.UNSET removes that key.
+
+        Raises:
+            VaultError: If the operation fails, the file is not found, or
+                the path is invalid.
+
+        Example:
+            ```python
+            await vault.set_frontmatter(
+                "areas/reading.md",
+                {"status": "done", "due": vault.UNSET, "note": None},
+            )
+            ```
+        """
+        # The sentinel never crosses the wire. Splitting it into a list of
+        # key names keeps user data from colliding with a magic value.
+        data = {}
+        unset = []
+        for key, value in frontmatter.items():
+            if value is _UNSET:
+                unset.append(key)
+            else:
+                data[key] = value
+
+        await self._port._call("set_frontmatter", path=path, data=data, unset=unset)
 
     async def frame(self) -> Any:
         """Return all notes as a pandas DataFrame.

@@ -835,6 +835,8 @@ export default class MarimoPlugin extends Plugin {
 					this.app.vault.modifyBinary(file as TFile, data),
 				process: (file: TFile, fn: (data: string) => string) =>
 					this.app.vault.process(file, fn),
+				processFrontmatter: (file: TFile, fn: (frontmatter: Record<string, unknown>) => void) =>
+					this.app.fileManager.processFrontMatter(file, fn),
 				trashFile: (file: TAbstractFile) =>
 					this.app.fileManager.trashFile(file),
 				exists: (path: string) => this.app.vault.adapter.exists(path),

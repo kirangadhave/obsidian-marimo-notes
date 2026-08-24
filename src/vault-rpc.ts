@@ -85,6 +85,7 @@ export interface VaultRpcHost {
 	modify(file: TAbstractFile, data: string): Promise<void>;
 	modifyBinary(file: TAbstractFile, data: ArrayBuffer): Promise<void>;
 	process(file: TFile, fn: (data: string) => string): Promise<string>;
+	processFrontmatter(file: TFile, fn: (frontmatter: Record<string, unknown>) => void): Promise<void>;
 	trashFile(file: TAbstractFile): Promise<void>;
 	exists(path: string): Promise<boolean>;
 }
@@ -116,14 +117,41 @@ function toWritable(data: unknown): string | ArrayBuffer {
 	throw new VaultRpcError("invalid_arg", "The data must be text or bytes.");
 }
 
+interface FrontmatterEdit {
+	data: Record<string, unknown>;
+	unset: string[];
+}
+
+/**
+ * Combines two pending frontmatter edits. A key named by both sides takes the
+ * later intent, so setting a key after removing it leaves it set.
+ */
+function mergeFrontmatterEdits(
+	older: FrontmatterEdit,
+	newer: FrontmatterEdit,
+): FrontmatterEdit {
+	const data: Record<string, unknown> = { ...older.data };
+	for (const key of newer.unset) {
+		delete data[key];
+	}
+	const unset = older.unset.filter((key) => !(key in newer.data));
+	for (const key of newer.unset) {
+		if (!unset.includes(key)) {
+			unset.push(key);
+		}
+	}
+	return { data: { ...data, ...newer.data }, unset };
+}
+
 interface WriteEntry {
 	timer: number | null;
 	data: unknown;
 	isText: boolean;
-	kind: "write" | "append";
+	kind: "write" | "append" | "set_frontmatter";
 	promise: Promise<void>;
 	resolve: (() => void) | null;
 	reject: ((err: Error) => void) | null;
+	unset?: string[];
 }
 
 export class VaultRpc {
@@ -254,6 +282,10 @@ export class VaultRpc {
 			return await this.opAppend(request);
 		}
 
+		if (op === "set_frontmatter") {
+			return await this.opSetFrontmatter(request);
+		}
+
 		if (op === "trash") {
 			return await this.opTrash(request);
 		}
@@ -345,6 +377,47 @@ export class VaultRpc {
 		await this.queueWrite(path, data, true, "append");
 	}
 
+	private async opSetFrontmatter(request: Request): Promise<void> {
+		const path = this.validateRequestPath(request);
+
+		this.denySelfWrite(path);
+
+		const data = request.data;
+		const unset = request.unset;
+
+		if (
+			data !== undefined &&
+			data !== null &&
+			(typeof data !== "object" || Array.isArray(data))
+		) {
+			throw new VaultRpcError("invalid_arg", "data must be an object");
+		}
+
+		if (
+			unset !== undefined &&
+			unset !== null &&
+			(!Array.isArray(unset) ||
+				!unset.every((item: unknown) => typeof item === "string"))
+		) {
+			throw new VaultRpcError("invalid_arg", "unset must be an array of strings");
+		}
+
+		const file = this.host.getAbstractFileByPath(path);
+		if (!file || file instanceof TFolder) {
+			throw new VaultRpcError("not_found", `File not found: ${path}`);
+		}
+
+		await this.queueWrite(
+			path,
+			{
+				data: data || {},
+				unset: unset || [],
+			},
+			false,
+			"set_frontmatter",
+		);
+	}
+
 	private async opTrash(request: Request): Promise<void> {
 		const path = this.validateRequestPath(request);
 
@@ -409,16 +482,17 @@ export class VaultRpc {
 	/**
 	 * The window is per path, so a write to one note never waits behind a
 	 * write to another. For writes, a newer value replaces the older one.
-	 * For appends, values concatenate in arrival order. A write and append
-	 * do not mix: when the kind changes for a path, the pending entry flushes
-	 * immediately and the new kind queues separately. This ensures no appended
-	 * data is lost.
+	 * For appends, values concatenate in arrival order. For set_frontmatter,
+	 * pending entries merge: data dicts combine (new wins) and unset lists
+	 * accumulate (with deduplication). A write and append do not mix: when the
+	 * kind changes for a path, the pending entry flushes immediately and the
+	 * new kind queues separately. This ensures no appended data is lost.
 	 */
 	private async queueWrite(
 		path: string,
 		data: unknown,
 		isText: boolean,
-		kind: "write" | "append",
+		kind: "write" | "append" | "set_frontmatter",
 	): Promise<void> {
 		const existing = this.writeQueues.get(path);
 		if (existing && existing.kind === kind) {
@@ -427,17 +501,23 @@ export class VaultRpc {
 			}
 			// A newer whole-file value replaces the older one and loses
 			// nothing. A dropped append loses data, so appends accumulate.
-			existing.data =
-				kind === "append"
-					? (existing.data as string) + (data as string)
-					: data;
+			// Frontmatter merges into the file, so two pending calls merge
+			// with each other, and the later intent for a key wins.
+			if (kind === "append") {
+				existing.data = (existing.data as string) + (data as string);
+			} else if (kind === "set_frontmatter") {
+				existing.data = mergeFrontmatterEdits(
+					existing.data as FrontmatterEdit,
+					data as FrontmatterEdit,
+				);
+			} else {
+				existing.data = data;
+			}
 			existing.isText = isText;
 			existing.timer = window.setTimeout(() => this.flushPath(path), 500);
 			return existing.promise;
 		}
 		if (existing) {
-			// The pending value has to land first, or the two kinds race for
-			// the same file.
 			await this.flushPath(path);
 		}
 
@@ -480,6 +560,12 @@ export class VaultRpc {
 		try {
 			if (entry.kind === "append") {
 				await this.performAppend(path, entry.data as string);
+			} else if (entry.kind === "set_frontmatter") {
+				const payload = entry.data as {
+					data: Record<string, unknown>;
+					unset: string[];
+				};
+				await this.performSetFrontmatter(path, payload.data, payload.unset);
 			} else {
 				await this.performWrite(path, entry.data, entry.isText);
 			}
@@ -547,6 +633,26 @@ export class VaultRpc {
 		} else {
 			await this.host.create(path, text);
 		}
+	}
+
+	private async performSetFrontmatter(
+		path: string,
+		data: Record<string, unknown>,
+		unset: string[],
+	): Promise<void> {
+		const file = this.host.getAbstractFileByPath(path);
+		if (!file || file instanceof TFolder) {
+			throw new VaultRpcError("not_found", `File not found: ${path}`);
+		}
+
+		await this.host.processFrontmatter(file as TFile, (frontmatter) => {
+			for (const [key, value] of Object.entries(data)) {
+				frontmatter[key] = value;
+			}
+			for (const key of unset) {
+				delete frontmatter[key];
+			}
+		});
 	}
 
 	/** Best effort only: unload is synchronous and the vault API is not. */
