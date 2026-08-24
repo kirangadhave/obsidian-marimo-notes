@@ -70,6 +70,7 @@ export interface VaultRpcHost {
 	getFiles(): Array<{ path: string; ext: string; size: number; mtime: number }>;
 	getNotes(folder?: string, tag?: string): Promise<NoteEntry[]>;
 	getLinks(): Promise<LinkGraph>;
+	getSelf(): Promise<NoteEntry | null>;
 }
 
 /** One vault change, as the plugin observed it. */
@@ -194,6 +195,10 @@ export class VaultRpc {
 			return await this.host.getLinks();
 		}
 
+		if (op === "self") {
+			return await this.opSelf();
+		}
+
 		throw new VaultRpcError("unknown_op", `Unknown operation: ${op}`);
 	}
 
@@ -242,6 +247,17 @@ export class VaultRpc {
 		}
 
 		return await this.host.getNotes(folder || undefined, tag || undefined);
+	}
+
+	private async opSelf(): Promise<unknown> {
+		const entry = await this.host.getSelf();
+		if (entry === null) {
+			throw new VaultRpcError(
+				"not_found",
+				"The notebook is not attached to a note",
+			);
+		}
+		return entry;
 	}
 
 	private sendResponse(response: Response): void {

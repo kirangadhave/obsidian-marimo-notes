@@ -4,6 +4,7 @@ import {
 	Notice,
 	Plugin,
 	requestUrl,
+	TFile,
 } from "obsidian";
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
@@ -73,6 +74,7 @@ export default class MarimoPlugin extends Plugin {
 	private bootError: string | null = null;
 	private vaultRpc: VaultRpc | null = null;
 	private metadataCacheResolved: Promise<void> | null = null;
+	private appIdToPath = new Map<string, string>();
 
 	async onload() {
 		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
@@ -166,8 +168,10 @@ export default class MarimoPlugin extends Plugin {
 		// parser-created elements take the upgrade path, which is allowed.
 		// All cells from the same note share one app id, i.e. one reactive
 		// notebook: a slider in one block reruns dependent blocks below it.
+		const appId = appIdForPath(sourcePath);
+		this.appIdToPath.set(appId, sourcePath);
 		wrapper.innerHTML = islandHtml(
-			appIdForPath(sourcePath),
+			appId,
 			code,
 			this.loaderText(),
 		);
@@ -483,6 +487,23 @@ export default class MarimoPlugin extends Plugin {
 		);
 	}
 
+	private getLiveAppId(): string | null {
+		const appIds = new Set<string>();
+		for (const el of this.reactiveIslands()) {
+			if (this.isBootstrapIsland(el)) {
+				continue;
+			}
+			const appId = el.getAttribute("data-app-id");
+			if (appId) {
+				appIds.add(appId);
+			}
+		}
+		if (appIds.size === 1) {
+			return Array.from(appIds)[0];
+		}
+		return null;
+	}
+
 	/** Loads the islands runtime + stylesheet once per session. */
 	private loadRuntime(): Promise<IslandsRuntime> {
 		if (!this.runtime) {
@@ -619,6 +640,7 @@ export default class MarimoPlugin extends Plugin {
 				getNotes: async (folder?: string, tag?: string) =>
 					await this.buildNotes(folder, tag),
 				getLinks: async () => await this.buildLinks(),
+				getSelf: async () => await this.getSelfNote(),
 			};
 			this.vaultRpc = new VaultRpc(data.port, host);
 			return;
@@ -763,6 +785,94 @@ export default class MarimoPlugin extends Plugin {
 		});
 	}
 
+	private buildNoteEntry(file: TFile): NoteEntry {
+		const cache = this.app.metadataCache.getFileCache(file);
+
+		const allTags = cache ? (getAllTags(cache) || []) : [];
+
+		let frontmatter: Record<string, unknown> = {};
+		if (cache?.frontmatter) {
+			try {
+				frontmatter = JSON.parse(JSON.stringify(cache.frontmatter));
+			} catch {
+				// User frontmatter can be arbitrary YAML with cyclic values.
+			}
+		}
+
+		const headings = (cache?.headings || []).map((h) => ({
+			heading: h.heading,
+			level: h.level,
+		}));
+
+		const linksArray: Array<{ link: string; target: string | null }> = [];
+		const unresolvedSet = new Set<string>();
+
+		if (cache) {
+			const allLinks = [
+				...(cache.links || []),
+				...(cache.embeds || []),
+				...(cache.frontmatterLinks || []),
+			];
+
+			for (const linkItem of allLinks) {
+				const linkText = linkItem.link.split(/[#^]/)[0];
+
+				if (!linkText) {
+					continue;
+				}
+
+				const target = this.app.metadataCache.getFirstLinkpathDest(
+					linkText,
+					file.path,
+				);
+
+				linksArray.push({
+					link: linkItem.link,
+					target: target ? target.path : null,
+				});
+
+				if (!target) {
+					unresolvedSet.add(linkItem.link);
+				}
+			}
+		}
+
+		const tasks: Array<{ done: boolean; line: number }> = [];
+		if (cache?.listItems) {
+			for (const item of cache.listItems) {
+				if (item.task !== undefined) {
+					tasks.push({
+						done: item.task !== " ",
+						line: item.position.start.line,
+					});
+				}
+			}
+		}
+
+		const blocks = cache?.blocks
+			? Object.keys(cache.blocks)
+			: [];
+
+		const parent = file.parent?.path ?? "";
+		const parentFolder = parent === "/" ? "" : parent;
+
+		return {
+			path: file.path,
+			name: file.basename,
+			folder: parentFolder,
+			size: file.stat.size,
+			ctime: file.stat.ctime,
+			mtime: file.stat.mtime,
+			frontmatter,
+			tags: allTags,
+			headings,
+			links: linksArray,
+			unresolved: Array.from(unresolvedSet),
+			tasks,
+			blocks,
+		};
+	}
+
 	private async buildNotes(folder?: string, tag?: string): Promise<NoteEntry[]> {
 		await this.metadataCacheResolved;
 
@@ -780,101 +890,17 @@ export default class MarimoPlugin extends Plugin {
 				}
 			}
 
-			const cache = this.app.metadataCache.getFileCache(file);
-
-			const allTags = cache ? (getAllTags(cache) || []) : [];
-			const normalizedTags = new Set(
-				allTags.map((t) => t.replace(/^#/, "").toLowerCase())
-			);
-
-			if (normalizedTag && !normalizedTags.has(normalizedTag)) {
-				continue;
-			}
-
-			let frontmatter: Record<string, unknown> = {};
-			if (cache?.frontmatter) {
-				try {
-					frontmatter = JSON.parse(JSON.stringify(cache.frontmatter));
-				} catch {
-					// User frontmatter can be arbitrary YAML with cyclic values.
+			const entry = this.buildNoteEntry(file);
+			if (normalizedTag) {
+				const has = entry.tags.some(
+					(t) => t.replace(/^#/, "").toLowerCase() === normalizedTag,
+				);
+				if (!has) {
+					continue;
 				}
 			}
 
-			const headings = (cache?.headings || []).map((h) => ({
-				heading: h.heading,
-				level: h.level,
-			}));
-
-			const linksArray: Array<{ link: string; target: string | null }> = [];
-			const unresolvedSet = new Set<string>();
-
-			if (cache) {
-				const allLinks = [
-					...(cache.links || []),
-					...(cache.embeds || []),
-					...(cache.frontmatterLinks || []),
-				];
-
-				for (const linkItem of allLinks) {
-					// Resolver takes linkpath, not full linktext with anchor/block suffix.
-					const linkText = linkItem.link.split(/[#^]/)[0];
-
-					if (!linkText) {
-						continue;
-					}
-
-					const target = this.app.metadataCache.getFirstLinkpathDest(
-						linkText,
-						file.path,
-					);
-
-					linksArray.push({
-						link: linkItem.link,
-						target: target ? target.path : null,
-					});
-
-					if (!target) {
-						unresolvedSet.add(linkItem.link);
-					}
-				}
-			}
-
-			const tasks: Array<{ done: boolean; line: number }> = [];
-			if (cache?.listItems) {
-				for (const item of cache.listItems) {
-					if (item.task !== undefined) {
-						tasks.push({
-							done: item.task !== " ",
-							line: item.position.start.line,
-						});
-					}
-				}
-			}
-
-			const blocks = cache?.blocks
-				? Object.keys(cache.blocks)
-				: [];
-
-			// Obsidian names the root folder "/", which is not a prefix any
-			// caller writes. Report the root as an empty path instead.
-			const parent = file.parent?.path ?? "";
-			const parentFolder = parent === "/" ? "" : parent;
-
-			notes.push({
-				path: file.path,
-				name: file.basename,
-				folder: parentFolder,
-				size: file.stat.size,
-				ctime: file.stat.ctime,
-				mtime: file.stat.mtime,
-				frontmatter,
-				tags: allTags,
-				headings,
-				links: linksArray,
-				unresolved: Array.from(unresolvedSet),
-				tasks,
-				blocks,
-			});
+			notes.push(entry);
 		}
 
 		return notes.sort((a, b) => a.path.localeCompare(b.path));
@@ -899,6 +925,27 @@ export default class MarimoPlugin extends Plugin {
 		}
 
 		return { resolved, unresolved };
+	}
+
+	private async getSelfNote(): Promise<NoteEntry | null> {
+		await this.metadataCacheResolved;
+
+		const liveAppId = this.getLiveAppId();
+		if (liveAppId === null) {
+			return null;
+		}
+
+		const sourcePath = this.appIdToPath.get(liveAppId);
+		if (!sourcePath) {
+			return null;
+		}
+
+		const file = this.app.vault.getFileByPath(sourcePath);
+		if (!file) {
+			return null;
+		}
+
+		return this.buildNoteEntry(file);
 	}
 
 	/**

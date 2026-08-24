@@ -454,6 +454,18 @@ class Vault:
         result.sort(key=lambda t: (t["path"], t["line"]))
         return result
 
+    async def self_note(self) -> Note:
+        """Return the note that hosts this notebook.
+
+        Returns:
+            A Note object for the hosting note.
+
+        Raises:
+            VaultError: If the notebook is not attached to a note.
+        """
+        response = await self._port._call("self")
+        return Note(response, self)
+
     async def frontmatter(self, path: str) -> dict[str, Any]:
         """Read the frontmatter of one note.
 
@@ -524,6 +536,11 @@ class Vault:
             rows.append(row)
 
         return pd.DataFrame(rows)
+
+    # The documented call is vault.self(). A method named self would shadow
+    # the instance parameter inside its own body, so the alias carries the
+    # name and self_note carries the definition.
+    self = self_note
 
 
 vault = Vault()
