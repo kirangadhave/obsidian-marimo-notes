@@ -12,6 +12,7 @@ import {
 	VaultRpc,
 	type LinkGraph,
 	type NoteEntry,
+	type VaultEvent,
 	type VaultRpcHost,
 } from "./vault-rpc";
 
@@ -75,6 +76,7 @@ export default class MarimoPlugin extends Plugin {
 
 	async onload() {
 		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
+		this.watchVaultEvents();
 
 		// Both fence flavors — ```marimo and ```python {.marimo} — share one
 		// pipeline: this post-processor in reading view, the editor extension
@@ -897,6 +899,51 @@ export default class MarimoPlugin extends Plugin {
 		}
 
 		return { resolved, unresolved };
+	}
+
+	/**
+	 * Feeds vault changes to the notebook so its cached metadata does not go
+	 * stale. Watching starts only once the layout is ready, because the
+	 * initial vault scan would otherwise report every file as a creation.
+	 */
+	private watchVaultEvents(): void {
+		const record = (
+			kind: VaultEvent["kind"],
+			path: string,
+			oldPath?: string,
+		) => this.vaultRpc?.recordEvent(kind, path, oldPath);
+
+		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(
+				this.app.vault.on("create", (file) => {
+					record("create", file.path);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.vault.on("modify", (file) => {
+					record("modify", file.path);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.vault.on("delete", (file) => {
+					record("delete", file.path);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.vault.on("rename", (file, oldPath) => {
+					record("rename", file.path, oldPath);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.metadataCache.on("changed", (file) => {
+					record("modify", file.path);
+				}),
+			);
+		});
 	}
 }
 

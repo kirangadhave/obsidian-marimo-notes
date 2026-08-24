@@ -135,6 +135,7 @@ class _VaultPort:
         self.next_id = 0
         self.pending: dict[int, asyncio.Future[Any]] = {}
         self._message_proxy: Any = None
+        self._event_callback: Any = None
 
     async def _ensure_port(self, timeout: float = 2.0) -> None:
         """Wait for the plugin to publish the vault port.
@@ -176,9 +177,16 @@ class _VaultPort:
             if not hasattr(data_obj, "to_py"):
                 return
             data = data_obj.to_py()
-            if not isinstance(data, dict) or not isinstance(
-                data.get("id"), (int, float)
-            ):
+            if not isinstance(data, dict):
+                return
+
+            # A push carries no id, because nothing answers it.
+            if data.get("op") == "event" and "id" not in data:
+                if self._event_callback is not None:
+                    self._event_callback(data.get("events", []))
+                return
+
+            if not isinstance(data.get("id"), (int, float)):
                 return
             future = self.pending.get(int(data["id"]))
             if future is not None and not future.done():
@@ -188,6 +196,14 @@ class _VaultPort:
         # destroy the callback while the port holds it.
         self._message_proxy = create_proxy(on_message)
         self.port.onmessage = self._message_proxy
+
+    def set_event_callback(self, callback: Any) -> None:
+        """Register a callback for event pushes from the plugin.
+
+        Args:
+            callback: A callable that receives a list of event dicts.
+        """
+        self._event_callback = callback
 
     async def _call(self, op: str, **kwargs: Any) -> Any:
         """Send a vault RPC request and wait for response.
@@ -239,6 +255,26 @@ class Vault:
         self._notes_raw_cache: list[dict[str, Any]] | None = None
         self._links_cache: dict[str, Any] | None = None
         self._backlinks_cache: dict[str, list[str]] | None = None
+        #: The most recent batch of events from the vault.
+        self.last_events: list[dict[str, Any]] = []
+
+        self._port.set_event_callback(self._on_vault_events)
+
+    def _on_vault_events(self, events: list[dict[str, Any]]) -> None:
+        """Drop every cache after the vault changes.
+
+        Invalidation is global. Granular invalidation adds bookkeeping for no
+        practical gain at this data size.
+
+        Args:
+            events (list[dict[str, Any]]): Each dict carries kind, path, and
+                oldPath for a rename.
+        """
+        self.last_events = events
+        self._notes_cache = None
+        self._notes_raw_cache = None
+        self._links_cache = None
+        self._backlinks_cache = None
 
     async def read(self, path: str) -> str:
         """Return the current text content of a vault file."""

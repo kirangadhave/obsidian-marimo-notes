@@ -72,15 +72,74 @@ export interface VaultRpcHost {
 	getLinks(): Promise<LinkGraph>;
 }
 
+/** One vault change, as the plugin observed it. */
+export interface VaultEvent {
+	kind: "create" | "modify" | "delete" | "rename";
+	path: string;
+	oldPath?: string;
+}
+
 export class VaultRpc {
 	private port: MessagePort;
 	private host: VaultRpcHost;
+	private eventBatch: VaultEvent[] = [];
+	private eventTimer: number | null = null;
+	private eventPathIndex = new Map<string, number>();
 
 	constructor(port: MessagePort, host: VaultRpcHost) {
 		this.port = port;
 		this.host = host;
 		this.port.onmessage = (ev) => this.handleRequest(ev.data);
 		this.port.start();
+	}
+
+	/**
+	 * Records one vault change for the next push. Obsidian fires modify on
+	 * every autosave, so the batch window below is the storm control.
+	 */
+	recordEvent(kind: VaultEvent["kind"], path: string, oldPath?: string): void {
+		const event: VaultEvent = { kind, path };
+		if (oldPath !== undefined) {
+			event.oldPath = oldPath;
+		}
+
+		const existingIndex = this.eventPathIndex.get(path);
+		if (existingIndex !== undefined) {
+			this.eventBatch[existingIndex] = event;
+		} else {
+			this.eventPathIndex.set(path, this.eventBatch.length);
+			this.eventBatch.push(event);
+		}
+
+		this.schedulePush();
+	}
+
+	/**
+	 * The first change opens a fixed window rather than restarting a timer,
+	 * so a steady stream of edits still reaches the notebook on time.
+	 */
+	private schedulePush(): void {
+		if (this.eventTimer !== null) {
+			return;
+		}
+
+		this.eventTimer = window.setTimeout(() => {
+			this.eventTimer = null;
+			this.flushEvents();
+		}, 500);
+	}
+
+	private flushEvents(): void {
+		if (this.eventBatch.length === 0) {
+			return;
+		}
+
+		const events = this.eventBatch;
+		this.eventBatch = [];
+		this.eventPathIndex.clear();
+
+		// No id: nothing answers this message.
+		this.port.postMessage({ op: "event", events });
 	}
 
 	private async handleRequest(data: unknown): Promise<void> {
