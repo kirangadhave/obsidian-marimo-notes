@@ -27,7 +27,7 @@ const CDN_BASE = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VE
 
 interface IslandsRuntime {
 	initialize(): Promise<void>;
-	stopApp(appId?: string): Promise<void>;
+	stopApp?(appId?: string): Promise<void>;
 }
 
 // esbuild outputs CJS, which rewrites `import()` to `require()`. Route the
@@ -75,6 +75,7 @@ export default class MarimoPlugin extends Plugin {
 	private vaultRpc: VaultRpc | null = null;
 	private metadataCacheResolved: Promise<void> | null = null;
 	private appIdToPath = new Map<string, string>();
+	private currentLiveAppId: string | null = null;
 
 	async onload() {
 		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
@@ -118,9 +119,10 @@ export default class MarimoPlugin extends Plugin {
 			this.app.workspace.on("layout-change", () => this.scheduleInitialize()),
 		);
 		this.registerEvent(
-			this.app.workspace.on("active-leaf-change", () =>
-				this.scheduleInitialize(),
-			),
+			this.app.workspace.on("active-leaf-change", () => {
+				void this.stopOutgoingApp();
+				this.scheduleInitialize();
+			}),
 		);
 
 		this.addCommand({
@@ -266,20 +268,27 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	/**
-	 * Obsidian keeps the live-preview and reading-view DOMs alive at once,
-	 * each holding a copy of every island. marimo's Pyodide runtime is a
-	 * singleton per interpreter, so the duplicate cells must not all join the
-	 * app (duplicate definitions error, and two concurrent apps crash with
-	 * "RuntimeContext was already initialized"). The inactive view is
-	 * display:none (offsetParent === null); make only visible islands
-	 * reactive — the parser ignores non-reactive ones.
+	 * marimo's Pyodide runtime is a singleton per interpreter, so exactly one
+	 * app is live: the one the active note owns. A note that is visible but
+	 * not active stays static.
+	 *
+	 * Visibility is the second half of the rule. Obsidian keeps the
+	 * live-preview and reading-view DOMs alive at once, each holding a copy of
+	 * every island, and displays one of them. Two copies of a cell in one app
+	 * is a duplicate-definitions error, so only the displayed copy joins. The
+	 * hidden view is display:none (offsetParent === null). The parser ignores
+	 * non-reactive islands.
 	 */
 	private markVisibleIslandsReactive() {
+		const activeNoteAppId = this.getActiveNoteAppId();
+		this.currentLiveAppId = activeNoteAppId;
 		for (const el of this.allIslands()) {
 			if (this.isBootstrapIsland(el)) {
 				continue; // handled by ensureBootstrapIslands
 			}
-			el.setAttribute("data-reactive", String(el.offsetParent !== null));
+			const isOwned = el.getAttribute("data-app-id") === activeNoteAppId;
+			const isVisible = el.offsetParent !== null;
+			el.setAttribute("data-reactive", String(isOwned && isVisible));
 		}
 	}
 
@@ -487,21 +496,43 @@ export default class MarimoPlugin extends Plugin {
 		);
 	}
 
+	private getActiveNoteAppId(): string | null {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			return null;
+		}
+		return appIdForPath(activeFile.path);
+	}
+
+	/**
+	 * Hands the interpreter to the newly active note. Stopping the outgoing
+	 * session destroys its Python bridge while the worker and Pyodide persist,
+	 * so a switch costs one session start and not a runtime reboot.
+	 */
+	private async stopOutgoingApp(): Promise<void> {
+		const outgoing = this.currentLiveAppId;
+		if (!outgoing || outgoing === this.getActiveNoteAppId()) {
+			return;
+		}
+		// Never boot the runtime just to stop an app that cannot be running.
+		if (!this.runtime) {
+			return;
+		}
+		try {
+			const runtime = await this.runtime;
+			await runtime.stopApp?.(outgoing);
+		} catch (error) {
+			console.warn("[marimo] failed to stop the outgoing app", error);
+		}
+	}
+
+	/**
+	 * The app the interpreter currently belongs to. An active note with no
+	 * islands owns no app, so the registry lookup is what makes this reliable.
+	 */
 	private getLiveAppId(): string | null {
-		const appIds = new Set<string>();
-		for (const el of this.reactiveIslands()) {
-			if (this.isBootstrapIsland(el)) {
-				continue;
-			}
-			const appId = el.getAttribute("data-app-id");
-			if (appId) {
-				appIds.add(appId);
-			}
-		}
-		if (appIds.size === 1) {
-			return Array.from(appIds)[0];
-		}
-		return null;
+		const appId = this.getActiveNoteAppId();
+		return appId && this.appIdToPath.has(appId) ? appId : null;
 	}
 
 	/** Loads the islands runtime + stylesheet once per session. */
