@@ -26,11 +26,12 @@ slider reruns the dependent cell below it.
 marimo's own [notebook-as-markdown format](https://docs.marimo.io/guides/exporting/markdown/)
 is also supported — fences like ```` ```python {.marimo} ```` are upgraded to
 islands, so a file produced by `marimo export md notebook.py` renders as a
-runnable notebook when opened in Obsidian. These fences render in both reading
-view and live preview. In live preview, hover an island and use the `</>`
-button (or move the cursor into the block) to edit the fence source. This works in reading view and in
-live preview; in live preview, move the cursor into a block (or use its hover
-edit button) to edit the source.
+runnable notebook when opened in Obsidian.
+
+Both fence flavors render in reading view and in live preview. In live preview,
+the island replaces the fence while the cursor is outside it. To edit the
+source, move the cursor into the block or click the `</>` button on the
+island.
 
 ## How it works
 
@@ -53,6 +54,11 @@ mdx-marimo):
    `data-app-id` into one notebook file, and executes it in a Pyodide web
    worker. `initialize()` is idempotent, so it is re-called (debounced) as
    Obsidian renders blocks.
+
+Two render paths feed step 1. Reading view uses a markdown post-processor. Live
+preview uses a CodeMirror state field (`src/live-preview.ts`) that replaces each
+fence with a block widget, because live preview draws fences as editor text and
+the reading-view post-processor never runs there.
 
 Unlike the static-site integrations, no build-time Python step is needed — the
 runtime executes the embedded code client-side; build-time output is only a
