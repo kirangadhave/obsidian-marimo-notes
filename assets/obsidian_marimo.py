@@ -35,13 +35,15 @@ class VaultError(Exception):
 class Note:
     """A markdown note in the vault with its metadata."""
 
-    def __init__(self, data: dict[str, Any]) -> None:
-        """Initialize a Note from metadata dict.
+    def __init__(self, data: dict[str, Any], vault: "Vault") -> None:
+        """Wrap one metadata entry.
 
         Args:
-            data (dict): Metadata dict from the vault API.
+            data (dict): One note entry from the vault API.
+            vault (Vault): The vault that answers delegated operations.
         """
         self._data = data
+        self._vault = vault
 
     @property
     def path(self) -> str:
@@ -107,6 +109,17 @@ class Note:
     def blocks(self) -> list[str]:
         """List of block IDs in this note."""
         return self._data["blocks"]
+
+    async def read(self) -> str:
+        """Return the current text content of this note.
+
+        Returns:
+            The note text.
+
+        Raises:
+            VaultError: If the read fails.
+        """
+        return await self._vault.read(self.path)
 
     def __repr__(self) -> str:
         """Return a string representation."""
@@ -223,6 +236,7 @@ class Vault:
         self.base: str = str(js.__VAULT_BASE__)
         self._port = _VaultPort()
         self._notes_cache: list[Note] | None = None
+        self._notes_raw_cache: list[dict[str, Any]] | None = None
         self._links_cache: dict[str, Any] | None = None
         self._backlinks_cache: dict[str, list[str]] | None = None
 
@@ -286,9 +300,10 @@ class Vault:
                 return self._notes_cache
 
         response = await self._port._call("notes", **kwargs)
-        notes = [Note(item) for item in response]
+        notes = [Note(item, self) for item in response]
 
         if not kwargs:
+            self._notes_raw_cache = response
             self._notes_cache = notes
 
         return notes
@@ -339,6 +354,140 @@ class Vault:
                 sources.sort()
 
         return list(self._backlinks_cache.get(path, []))
+
+    async def _raw_notes(self) -> list[dict[str, Any]]:
+        """Return the cached note entries as the wire delivered them."""
+        if self._notes_raw_cache is None:
+            await self.notes()
+        return self._notes_raw_cache or []
+
+    async def read_bytes(self, path: str) -> bytes:
+        """Return the current bytes content of a vault file.
+
+        Args:
+            path (str): Vault path to the file.
+
+        Returns:
+            The file's bytes content.
+
+        Raises:
+            VaultError: If the fetch fails or times out.
+        """
+        resp = await pyfetch(f"{self.base}{path}?t={js.Date.now()}")
+        return await resp.bytes()
+
+    async def read_many(self, paths: list[str]) -> list[str]:
+        """Fetch multiple files concurrently.
+
+        Args:
+            paths (list[str]): Vault paths to read.
+
+        Returns:
+            A list of file texts in the order the paths were given.
+
+        Raises:
+            VaultError: If any fetch fails or times out.
+        """
+        return await asyncio.gather(*[self.read(path) for path in paths])
+
+    async def tasks(
+        self, done: bool | None = None
+    ) -> list[dict[str, Any]]:
+        """Query every checkbox in the vault.
+
+        Args:
+            done (bool | None, optional): Filter by completion state.
+                True returns only finished tasks, False returns only open tasks,
+                and None returns all tasks. Default is None.
+
+        Returns:
+            A list of dicts, each with "path" (str), "done" (bool), and "line"
+            (int). Sorted by path, then by line.
+
+        Raises:
+            VaultError: If the notes query fails.
+        """
+        notes = await self.notes()
+        result = []
+        for note in notes:
+            for task in note.tasks:
+                if done is None or task["done"] == done:
+                    result.append(
+                        {"path": note.path, "done": task["done"], "line": task["line"]}
+                    )
+        result.sort(key=lambda t: (t["path"], t["line"]))
+        return result
+
+    async def frontmatter(self, path: str) -> dict[str, Any]:
+        """Read the frontmatter of one note.
+
+        Args:
+            path (str): Vault path to the note.
+
+        Returns:
+            The frontmatter dict, or empty dict if absent.
+
+        Raises:
+            VaultError: If the path is not a note in the vault (code: not_found).
+        """
+        notes = await self.notes()
+        for note in notes:
+            if note.path == path:
+                return note.frontmatter
+        raise VaultError("not_found", f"Note not found: {path}")
+
+    async def frame(self) -> Any:
+        """Return all notes as a pandas DataFrame.
+
+        Returns:
+            A DataFrame with one row per note. Frontmatter keys appear as
+            columns, prefixed with "fm_" to avoid collisions. Built-in columns
+            include path, name, folder, size, ctime, mtime, tags, headings,
+            links, unresolved, tasks, blocks.
+
+        Raises:
+            VaultError: If pandas is not installed (code: io_error).
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise VaultError(
+                "io_error",
+                "pandas is not installed. Install it with micropip: "
+                "await __import__('micropip').install('pandas')",
+            ) from None
+
+        raw_entries = await self._raw_notes()
+
+        rows = []
+        frontmatter_keys = set()
+
+        for entry in raw_entries:
+            for key in entry.get("frontmatter", {}).keys():
+                frontmatter_keys.add(key)
+
+        for entry in raw_entries:
+            row = {
+                "path": entry["path"],
+                "name": entry["name"],
+                "folder": entry["folder"],
+                "size": entry["size"],
+                "ctime": entry["ctime"],
+                "mtime": entry["mtime"],
+                "tags": entry["tags"],
+                "headings": entry["headings"],
+                "links": entry["links"],
+                "unresolved": entry["unresolved"],
+                "tasks": entry["tasks"],
+                "blocks": entry["blocks"],
+            }
+
+            for key in frontmatter_keys:
+                row[f"fm_{key}"] = entry.get("frontmatter", {}).get(key)
+
+            rows.append(row)
+
+        return pd.DataFrame(rows)
 
 
 vault = Vault()
