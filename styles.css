@@ -3,13 +3,40 @@
 	display: none;
 }
 
-/* marimo themes via CSS light-dark(), which resolves from color-scheme */
-.theme-dark .marimo-island-block {
-	color-scheme: dark;
-}
+/*
+ * The published runtime does not ship light-dark() to the browser. A build
+ * step rewrites its colors into numbered toggle variables, and those numbers
+ * collide between rules that share a selector, so driving the toggle from
+ * outside picks colors that belong to unrelated properties.
+ *
+ * Map the runtime's theme variables onto Obsidian's instead. An island then
+ * follows whatever theme the vault uses, including a custom one, rather than
+ * choosing between two palettes the runtime ships.
+ */
+.marimo-island-block {
+	color-scheme: inherit;
 
-.theme-light .marimo-island-block {
-	color-scheme: light;
+	--background: var(--background-primary);
+	--foreground: var(--text-normal);
+	--card: var(--background-primary);
+	--card-foreground: var(--text-normal);
+	--popover: var(--background-secondary);
+	--popover-foreground: var(--text-normal);
+	--muted: var(--background-secondary);
+	--muted-foreground: var(--text-muted);
+	--border: var(--background-modifier-border);
+	--input: var(--background-modifier-border);
+	--secondary: var(--background-secondary);
+	--secondary-foreground: var(--text-normal);
+	--accent: var(--background-modifier-hover);
+	--accent-foreground: var(--text-normal);
+	--primary: var(--interactive-accent);
+	--primary-foreground: var(--text-on-accent);
+	--destructive: var(--text-error);
+	--error: var(--text-error);
+	--success: var(--text-success);
+	--link: var(--text-accent);
+	--ring: var(--interactive-accent);
 }
 
 .marimo-island-block {
