@@ -2,7 +2,7 @@
  * Vault RPC dispatcher for requests from Python over MessagePort.
  */
 
-import { TAbstractFile } from "obsidian";
+import { TAbstractFile, TFile, TFolder } from "obsidian";
 import { validatePath } from "./validate-path";
 
 export interface NoteEntry {
@@ -77,6 +77,14 @@ export interface VaultRpcHost {
 	getConfigDir(): string;
 	getAbstractFileByPath(path: string): TAbstractFile | null;
 	checkSymlinkContainment(path: string): boolean;
+	getLiveAppSourcePath(): string | null;
+	createFolder(path: string): Promise<void>;
+	cachedRead(file: TAbstractFile): Promise<string>;
+	create(path: string, data: string): Promise<void>;
+	createBinary(path: string, data: ArrayBuffer): Promise<void>;
+	modify(file: TAbstractFile, data: string): Promise<void>;
+	modifyBinary(file: TAbstractFile, data: ArrayBuffer): Promise<void>;
+	exists(path: string): Promise<boolean>;
 }
 
 /** One vault change, as the plugin observed it. */
@@ -86,12 +94,42 @@ export interface VaultEvent {
 	oldPath?: string;
 }
 
+/**
+ * Narrows the wire payload to what the vault accepts. A typed array arrives
+ * whenever the caller sent bytes, and the vault takes the buffer behind it.
+ */
+function toWritable(data: unknown): string | ArrayBuffer {
+	if (typeof data === "string") {
+		return data;
+	}
+	if (data instanceof ArrayBuffer) {
+		return data;
+	}
+	if (ArrayBuffer.isView(data)) {
+		return data.buffer.slice(
+			data.byteOffset,
+			data.byteOffset + data.byteLength,
+		) as ArrayBuffer;
+	}
+	throw new VaultRpcError("invalid_arg", "The data must be text or bytes.");
+}
+
+interface WriteEntry {
+	timer: number | null;
+	data: unknown;
+	isText: boolean;
+	promise: Promise<void>;
+	resolve: (() => void) | null;
+	reject: ((err: Error) => void) | null;
+}
+
 export class VaultRpc {
 	private port: MessagePort;
 	private host: VaultRpcHost;
 	private eventBatch: VaultEvent[] = [];
 	private eventTimer: number | null = null;
 	private eventPathIndex = new Map<string, number>();
+	private writeQueues = new Map<string, WriteEntry>();
 
 	constructor(port: MessagePort, host: VaultRpcHost) {
 		this.port = port;
@@ -205,6 +243,14 @@ export class VaultRpc {
 			return await this.opSelf();
 		}
 
+		if (op === "write") {
+			return await this.opWrite(request);
+		}
+
+		if (op === "exists") {
+			return await this.opExists(request);
+		}
+
 		throw new VaultRpcError("unknown_op", `Unknown operation: ${op}`);
 	}
 
@@ -266,6 +312,31 @@ export class VaultRpc {
 		return entry;
 	}
 
+	private async opWrite(request: Request): Promise<void> {
+		const path = this.validateRequestPath(request);
+
+		const liveAppSourcePath = this.host.getLiveAppSourcePath();
+		if (liveAppSourcePath && path === liveAppSourcePath) {
+			throw new VaultRpcError(
+				"denied_self_write",
+				"Writing the note that hosts this notebook is not allowed.",
+			);
+		}
+
+		const data = toWritable(request.data);
+		await this.queueWrite(path, data, typeof data === "string");
+	}
+
+	private async opExists(request: Request): Promise<boolean> {
+		const path = request.path;
+
+		if (typeof path !== "string" || path === "") {
+			throw new VaultRpcError("invalid_path", "The path must be a non-empty string.");
+		}
+
+		return await this.host.exists(path);
+	}
+
 	/** Every write-class operation takes its path from here, never raw. */
 	private validateRequestPath(request: Request): string {
 		return validatePath(request.path, {
@@ -287,6 +358,118 @@ export class VaultRpc {
 			return { code: "io_error", message: error.message };
 		}
 		return { code: "io_error", message: String(error) };
+	}
+
+	/**
+	 * The window is per path, so a write to one note never waits behind a
+	 * write to another. A newer value for the same path replaces the older
+	 * one, and both callers wait on the same promise.
+	 */
+	private queueWrite(path: string, data: unknown, isText: boolean): Promise<void> {
+		const existing = this.writeQueues.get(path);
+		if (existing) {
+			if (existing.timer !== null) {
+				window.clearTimeout(existing.timer);
+			}
+			existing.data = data;
+			existing.isText = isText;
+			existing.timer = window.setTimeout(() => this.flushPath(path), 500);
+			return existing.promise;
+		}
+
+		let resolve: (() => void) | null = null;
+		let reject: ((err: Error) => void) | null = null;
+		const promise = new Promise<void>((res, rej) => {
+			resolve = res;
+			reject = rej;
+		});
+
+		this.writeQueues.set(path, {
+			timer: window.setTimeout(() => this.flushPath(path), 500),
+			data,
+			isText,
+			promise,
+			resolve,
+			reject,
+		});
+		return promise;
+	}
+
+	/**
+	 * The promise settles here and not on arrival. An early resolve would let
+	 * a kernel restart inside the window lose a write the notebook already
+	 * believed was durable. A caller whose value was superseded still
+	 * resolves, because a newer intent replaced it and that caller did
+	 * nothing wrong.
+	 */
+	private async flushPath(path: string): Promise<void> {
+		const entry = this.writeQueues.get(path);
+		if (!entry) {
+			return;
+		}
+		this.writeQueues.delete(path);
+		if (entry.timer !== null) {
+			window.clearTimeout(entry.timer);
+			entry.timer = null;
+		}
+		try {
+			await this.performWrite(path, entry.data, entry.isText);
+			entry.resolve?.();
+		} catch (error) {
+			entry.reject?.(error as Error);
+		}
+	}
+
+	private async flushWrites(): Promise<void> {
+		const paths = Array.from(this.writeQueues.keys());
+		await Promise.all(paths.map((path) => this.flushPath(path)));
+	}
+
+	private async performWrite(
+		path: string,
+		data: unknown,
+		isText: boolean,
+	): Promise<void> {
+		const parts = path.split("/");
+
+		for (let i = 0; i < parts.length - 1; i++) {
+			const folderPath = parts.slice(0, i + 1).join("/");
+			try {
+				await this.host.createFolder(folderPath);
+			} catch {
+				// The folder already exists, which is the common case.
+			}
+		}
+
+		const file = this.host.getAbstractFileByPath(path);
+
+		if (file && !(file instanceof TFolder)) {
+			if (isText) {
+				// Writing identical text fires a vault event that re-renders
+				// the note, which re-runs the cell, which writes again. Doing
+				// nothing is what makes a write loop reach a fixed point.
+				const current = await this.host.cachedRead(file);
+				if (current === data) {
+					return;
+				}
+				await this.host.modify(file, data as string);
+			} else {
+				await this.host.modifyBinary(file, data as ArrayBuffer);
+			}
+		} else {
+			if (isText) {
+				await this.host.create(path, data as string);
+			} else {
+				await this.host.createBinary(path, data as ArrayBuffer);
+			}
+		}
+	}
+
+	/** Best effort only: unload is synchronous and the vault API is not. */
+	flushOnUnload(): void {
+		void (async () => {
+			await this.flushWrites();
+		})();
 	}
 }
 

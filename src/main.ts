@@ -8,7 +8,9 @@ import {
 	PluginSettingTab,
 	requestUrl,
 	Setting,
+	TAbstractFile,
 	TFile,
+	TFolder,
 } from "obsidian";
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
@@ -270,6 +272,7 @@ export default class MarimoPlugin extends Plugin {
 		if (this.initTimer !== null) {
 			window.clearTimeout(this.initTimer);
 		}
+		this.vaultRpc?.flushOnUnload();
 	}
 
 	/** Builds the <marimo-island> DOM the islands runtime discovers on init. */
@@ -812,6 +815,25 @@ export default class MarimoPlugin extends Plugin {
 					this.app.vault.getAbstractFileByPath(path),
 				checkSymlinkContainment: (path: string) =>
 					this.symlinkChecker?.check(path) ?? false,
+				getLiveAppSourcePath: () => {
+					const liveAppId = this.getLiveAppId();
+					return liveAppId ? (this.appIdToPath.get(liveAppId) ?? null) : null;
+				},
+				createFolder: async (path: string) => {
+					await this.app.vault.createFolder(path);
+				},
+				cachedRead: (file: TAbstractFile) => this.app.vault.cachedRead(file as TFile),
+				create: async (path: string, data: string) => {
+					await this.app.vault.create(path, data);
+				},
+				createBinary: async (path: string, data: ArrayBuffer) => {
+					await this.app.vault.createBinary(path, data);
+				},
+				modify: (file: TAbstractFile, data: string) =>
+					this.app.vault.modify(file as TFile, data),
+				modifyBinary: (file: TAbstractFile, data: ArrayBuffer) =>
+					this.app.vault.modifyBinary(file as TFile, data),
+				exists: (path: string) => this.app.vault.adapter.exists(path),
 			};
 			this.vaultRpc = new VaultRpc(data.port, host);
 			return;

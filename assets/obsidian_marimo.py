@@ -121,6 +121,17 @@ class Note:
         """
         return await self._vault.read(self.path)
 
+    async def write(self, text: str) -> None:
+        """Write text to this note.
+
+        Args:
+            text (str): The text to write.
+
+        Raises:
+            VaultError: If the write fails.
+        """
+        await self._vault.write(self.path, text)
+
     def __repr__(self) -> str:
         """Return a string representation."""
         return f"Note(path={self.path!r})"
@@ -483,6 +494,37 @@ class Vault:
             if note.path == path:
                 return note.frontmatter
         raise VaultError("not_found", f"Note not found: {path}")
+
+    async def write(self, path: str, data: str | bytes) -> None:
+        """Write a file to the vault.
+
+        Args:
+            path (str): Vault path to write to.
+            data (str | bytes): File content. Strings are written as-is. Bytes
+                are written as binary.
+
+        Raises:
+            VaultError: If the write fails or the path is invalid.
+        """
+        # Bytes cross as a typed array, which structured clone moves without
+        # a copy into base64 and back.
+        wire_data = to_js(data) if isinstance(data, bytes) else data
+
+        await self._port._call("write", path=path, data=wire_data)
+
+    async def exists(self, path: str) -> bool:
+        """Check if a file exists in the vault.
+
+        Args:
+            path (str): Vault path to check.
+
+        Returns:
+            True if the file exists, False otherwise.
+
+        Raises:
+            VaultError: If the operation fails.
+        """
+        return await self._port._call("exists", path=path)
 
     async def frame(self) -> Any:
         """Return all notes as a pandas DataFrame.
