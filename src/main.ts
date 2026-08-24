@@ -672,6 +672,9 @@ export default class MarimoPlugin extends Plugin {
 					await this.buildNotes(folder, tag),
 				getLinks: async () => await this.buildLinks(),
 				getSelf: async () => await this.getSelfNote(),
+				getConfigDir: () => this.app.vault.configDir,
+				getAbstractFileByPath: (path: string) =>
+					this.app.vault.getAbstractFileByPath(path),
 			};
 			this.vaultRpc = new VaultRpc(data.port, host);
 			return;

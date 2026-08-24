@@ -2,6 +2,9 @@
  * Vault RPC dispatcher for requests from Python over MessagePort.
  */
 
+import { TAbstractFile } from "obsidian";
+import { validatePath } from "./validate-path";
+
 export interface NoteEntry {
 	path: string;
 	name: string;
@@ -71,6 +74,8 @@ export interface VaultRpcHost {
 	getNotes(folder?: string, tag?: string): Promise<NoteEntry[]>;
 	getLinks(): Promise<LinkGraph>;
 	getSelf(): Promise<NoteEntry | null>;
+	getConfigDir(): string;
+	getAbstractFileByPath(path: string): TAbstractFile | null;
 }
 
 /** One vault change, as the plugin observed it. */
@@ -258,6 +263,14 @@ export class VaultRpc {
 			);
 		}
 		return entry;
+	}
+
+	/** Every write-class operation takes its path from here, never raw. */
+	private validateRequestPath(request: Request): string {
+		return validatePath(request.path, {
+			configDir: this.host.getConfigDir(),
+			getAbstractFileByPath: (p) => this.host.getAbstractFileByPath(p),
+		});
 	}
 
 	private sendResponse(response: Response): void {
