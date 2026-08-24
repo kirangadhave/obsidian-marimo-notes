@@ -317,10 +317,17 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	/**
-	 * marimo's stylesheet keys dark mode off a Tailwind-style `.dark`
-	 * ancestor, so Obsidian's theme has to be mirrored onto every island
-	 * container. Called with no argument, it re-syncs every container, which
-	 * is what a theme switch needs.
+	 * Mirrors Obsidian's theme onto every island container. Called with no
+	 * argument, it re-syncs all of them, which is what a theme switch needs.
+	 *
+	 * color-scheme is the load-bearing half. marimo derives every color from
+	 * CSS light-dark(), which reads the color-scheme of the element using the
+	 * value, and color-scheme inherits across a shadow boundary. Setting it
+	 * inline means no selector has to match for a widget to be themed.
+	 *
+	 * The class is the other half, and it reaches less far. marimo's own dark
+	 * rules are descendant selectors, which cannot see a class outside a
+	 * shadow tree, so the class styles light-DOM output only.
 	 */
 	private syncIslandTheme(target?: HTMLElement) {
 		const dark = document.body.hasClass("theme-dark");
@@ -331,6 +338,7 @@ export default class MarimoPlugin extends Plugin {
 				);
 		for (const block of blocks) {
 			block.classList.toggle("dark", dark);
+			block.style.colorScheme = dark ? "dark" : "light";
 		}
 	}
 
