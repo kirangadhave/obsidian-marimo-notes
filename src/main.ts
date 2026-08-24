@@ -333,6 +333,15 @@ export default class MarimoPlugin extends Plugin {
 	 */
 	private syncIslandTheme(target?: HTMLElement) {
 		const dark = document.body.hasClass("theme-dark");
+
+		// The runtime picks its theme in JavaScript, by reading the color
+		// scheme off document.body. Its own stylesheet declares a light
+		// scheme on the document root, which body inherits, so without this
+		// line the runtime reads "light" in every vault and renders light
+		// output inside a dark note. Obsidian names the theme with a class
+		// the runtime does not know, so the scheme has to be stated here.
+		document.body.style.colorScheme = dark ? "dark" : "light";
+
 		this.themeSheet.replaceSync(
 			`:host{color-scheme:${dark ? "dark" : "light"}}`,
 		);
