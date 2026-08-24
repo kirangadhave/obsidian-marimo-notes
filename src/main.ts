@@ -361,6 +361,17 @@ export default class MarimoPlugin extends Plugin {
 		for (const block of blocks) {
 			block.classList.toggle("dark", dark);
 			block.style.colorScheme = dark ? "dark" : "light";
+			// The runtime ships its colors through a build-time polyfill for
+			// light-dark(), which picks a branch from this variable: empty
+			// selects the dark color, and the guaranteed-invalid default
+			// falls back to the light one. Its own rule for the dark branch
+			// needs an ancestor class, so setting the variable here states
+			// the choice where no other rule can outrank it.
+			if (dark) {
+				block.style.setProperty("--csstools-color-scheme--light", " ");
+			} else {
+				block.style.removeProperty("--csstools-color-scheme--light");
+			}
 		}
 	}
 
