@@ -10,16 +10,22 @@ Fetch the vault as a table and display it with pagination. The cell below calls 
 import marimo as mo
 from obsidian_marimo import vault, VaultError
 
+df = None
 try:
     df = await vault.frame()
-    mo.ui.table(df, page_size=5)
+    view = mo.ui.table(df, page_size=5)
 except VaultError as e:
-    mo.md(f"Error: {e.code} - {e.reason}")
+    view = mo.md(f"Error: {e.code} - {e.reason}")
+
+view
 ```
 
 Show the frontmatter columns. Each key found in any note's frontmatter becomes a column prefixed with `fm_`. The cell below lists all columns that start with `fm_`. The corpus includes three frontmatter keys: `fm_status`, `fm_rating`, and `fm_author`.
 
+If the vault loads successfully, the next cell lists all columns that start with `fm_`.
+
 ```marimo
+mo.stop(df is None, mo.md("Offline. Cannot list frontmatter columns."))
 fm_columns = [col for col in df.columns if col.startswith("fm_")]
 fm_columns
 ```

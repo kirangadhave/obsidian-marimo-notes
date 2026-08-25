@@ -1,15 +1,14 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 function getPython3() {
-	try {
-		execSync("which python3", { stdio: "pipe" });
-		return "python3";
-	} catch {
-		console.error("error: python3 not found in PATH");
-		process.exit(1);
+	const result = spawnSync("which", ["python3"], { encoding: "utf8" });
+	if (result.status === 0 && result.stdout.trim()) {
+		return result.stdout.trim();
 	}
+	console.error("error: python3 not found in PATH");
+	process.exit(1);
 }
 
 function walkMarkdown(dir) {
@@ -103,19 +102,16 @@ const python3 = getPython3();
 const checkerCode = buildSyntaxChecker();
 const input = JSON.stringify(allFences);
 
-try {
-	const output = execSync(`${python3} -c "${checkerCode.replace(/"/g, '\\"')}"`, {
-		input,
-		encoding: "utf8",
-		stdio: ["pipe", "pipe", "pipe"],
-	});
-	process.stdout.write(output);
-} catch (error) {
-	if (error.stdout) {
-		process.stdout.write(error.stdout);
-	}
-	if (error.stderr) {
-		process.stderr.write(error.stderr);
-	}
-	process.exit(error.status || 1);
+const result = spawnSync(python3, ["-c", checkerCode], {
+	input,
+	encoding: "utf8",
+	stdio: ["pipe", "pipe", "pipe"],
+});
+
+if (result.stdout) {
+	process.stdout.write(result.stdout);
 }
+if (result.stderr) {
+	process.stderr.write(result.stderr);
+}
+process.exit(result.status || 0);
