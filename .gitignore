@@ -13,5 +13,8 @@ examples/demo-vault/.obsidian/app.json
 examples/demo-vault/.obsidian/appearance.json
 examples/demo-vault/.obsidian/core-plugins.json
 
+# pnpm store, when the store lives inside the workspace
+.pnpm-store/
+
 # machine-local Conductor config
 .conductor/settings.local.toml
