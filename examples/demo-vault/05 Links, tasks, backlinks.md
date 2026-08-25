@@ -2,22 +2,23 @@
 
 The vault tracks all links between notes, all tasks (checkboxes) across the vault, and unresolved links that point at files that do not exist. Use these methods to analyze the note graph and track work.
 
-Fetch the forward link graph. The cell below calls `vault.links()` to get all edges. The vault contains six forward links.
+Fetch the forward link graph. The cell below calls `vault.links()`, which returns a dict with `resolved` and `unresolved` edges. The corpus contains five resolved links and one unresolved link.
 
 ```marimo
 import marimo as mo
 from obsidian_marimo import vault
 
 links = await vault.links()
-link_count = len(links)
-link_count
+resolved_count = sum(len(targets) for targets in links["resolved"].values())
+unresolved_count = sum(len(targets) for targets in links["unresolved"].values())
+mo.md(f"**{resolved_count}** resolved links, **{unresolved_count}** unresolved link")
 ```
 
-Fetch backlinks to a specific note. The cell below calls `vault.backlinks()` to find all notes that link to `library/Book A.md`. Two notes in the vault link to Book A: `library/Reading list.md` and `library/Notes on fiction.md`.
+Fetch backlinks to a specific note. The cell below calls `vault.backlinks()`, which returns a list of source paths that link to `library/Book A.md`. Two notes in the vault link to Book A: `library/Reading list.md` and `library/Notes on fiction.md`.
 
 ```marimo
 backlinks = await vault.backlinks("library/Book A.md")
-[bl.path for bl in backlinks]
+backlinks
 ```
 
 To verify these results match what you see in Obsidian, open the backlinks pane for `library/Book A.md` inside Obsidian and compare it with the list above. Both sources will show the same two notes.
