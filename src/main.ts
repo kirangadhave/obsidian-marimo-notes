@@ -197,7 +197,6 @@ export default class MarimoPlugin extends Plugin {
 	private metadataCacheResolved: Promise<void> | null = null;
 	private appIdToPath = new Map<string, string>();
 	private currentLiveAppId: string | null = null;
-	private themeSheet = new CSSStyleSheet();
 
 	async onload() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -211,7 +210,6 @@ export default class MarimoPlugin extends Plugin {
 		this.addSettingTab(new MarimoSettingTab(this.app, this));
 
 		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
-		this.syncIslandTheme();
 		this.watchVaultEvents();
 
 		// Both fence flavors — ```marimo and ```python {.marimo} — share one
@@ -250,12 +248,6 @@ export default class MarimoPlugin extends Plugin {
 		// rebind, not a kernel restart, when code is unchanged).
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => this.scheduleInitialize()),
-		);
-
-		// A theme switch changes no island, so the mirrored class would keep
-		// the theme the island was built under until something rebuilds it.
-		this.registerEvent(
-			this.app.workspace.on("css-change", () => this.syncIslandTheme()),
 		);
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", () => {
@@ -299,13 +291,10 @@ export default class MarimoPlugin extends Plugin {
 			return;
 		}
 
-		// The `marimo` class is the runtime's hook for an embedded container.
-		// Its stylesheet declares every color variable on `:root, .marimo`,
-		// so without it the variables exist only on the document root, where
-		// the runtime's own stylesheet pins a light color scheme and the
-		// light branch of every light-dark() wins.
-		const wrapper = el.createDiv({ cls: "marimo-island-block marimo" });
-		this.syncIslandTheme(wrapper);
+		const wrapper = el.createDiv({ cls: "marimo-island-block" });
+		// marimo's stylesheet keys dark mode off a Tailwind-style `.dark`
+		// ancestor; mirror Obsidian's theme onto the island container.
+		wrapper.classList.toggle("dark", document.body.hasClass("theme-dark"));
 
 		// Built via innerHTML on purpose: once the runtime has defined the
 		// marimo-island custom element, document.createElement() would run its
@@ -321,47 +310,6 @@ export default class MarimoPlugin extends Plugin {
 			this.loaderText(),
 		);
 		this.scheduleInitialize();
-	}
-
-	/**
-	 * Mirrors Obsidian's theme onto every island container. Called with no
-	 * argument, it re-syncs all of them, which is what a theme switch needs.
-	 *
-	 * color-scheme is the load-bearing half. marimo derives every color from
-	 * CSS light-dark(), which reads the color-scheme of the element using the
-	 * value, and color-scheme inherits across a shadow boundary. Setting it
-	 * inline means no selector has to match for a widget to be themed.
-	 *
-	 * The class is the other half, and it reaches less far. marimo's own dark
-	 * rules are descendant selectors, which cannot see a class outside a
-	 * shadow tree, so the class styles light-DOM output only.
-	 */
-	private syncIslandTheme(target?: HTMLElement) {
-		const dark =
-			document.body.hasClass("theme-dark") ||
-			document.documentElement.hasClass("theme-dark");
-
-		// The runtime picks its theme in JavaScript, from document.body, and
-		// it never looks at the island. It tests for a `dark` class first and
-		// falls back to the body color scheme. Both are set here because
-		// Obsidian names its theme with a class the runtime does not know,
-		// and because the runtime's own stylesheet declares a light scheme on
-		// the document root that body would otherwise inherit.
-		document.body.classList.toggle("dark", dark);
-		document.body.style.colorScheme = dark ? "dark" : "light";
-
-		this.themeSheet.replaceSync(
-			`:host{color-scheme:${dark ? "dark" : "light"}}`,
-		);
-		const blocks = target
-			? [target]
-			: Array.from(
-					document.querySelectorAll<HTMLElement>(".marimo-island-block"),
-				);
-		for (const block of blocks) {
-			block.classList.toggle("dark", dark);
-			block.style.colorScheme = dark ? "dark" : "light";
-		}
 	}
 
 	/**
@@ -670,22 +618,8 @@ export default class MarimoPlugin extends Plugin {
 					sheet.replaceSync("");
 				}
 			}
-			this.adoptThemeSheet(sr);
 			this.scrubShadowStyles(sr);
 		}
-	}
-
-	/**
-	 * Carries the theme into a widget's shadow tree. Inheritance from the
-	 * host is supposed to be enough, and a rule written outside cannot select
-	 * into a shadow tree at all, so `:host` from inside is the one reliable
-	 * way to state the scheme where marimo resolves its colors.
-	 */
-	private adoptThemeSheet(sr: ShadowRoot) {
-		if (sr.adoptedStyleSheets.includes(this.themeSheet)) {
-			return;
-		}
-		sr.adoptedStyleSheets = [...sr.adoptedStyleSheets, this.themeSheet];
 	}
 
 	private allIslands(): HTMLElement[] {

@@ -87,10 +87,6 @@ via its worker shim.
   shadow roots adopt it), live-preview/reading-view DOM duplication (only the
   active note's islands join the live app), and recreated block DOM rebinding
   without a kernel restart (data-mo-code + cell index map).
-- A notebook reads the theme once, when it starts. Switching between light and
-  dark with a notebook open leaves that notebook showing the old theme. Reopen
-  the note to pick up the change. The runtime resolves its theme in JavaScript
-  at render time and does not watch for later changes.
 - Islands are marked an early/experimental feature upstream.
 
 ## Vault access
