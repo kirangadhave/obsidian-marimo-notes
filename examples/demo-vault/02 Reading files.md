@@ -2,14 +2,14 @@
 
 The vault provides three ways to read files. Use `vault.read()` to fetch one file as text, `vault.read_bytes()` to fetch binary data, and `vault.read_many()` to fetch many files at once.
 
-Read a single note as text. The cell below fetches `library/Dune.md` and displays its first heading.
+Read a single note as text. The cell below fetches `library/Book A.md` and displays its first heading.
 
 ```marimo
 import marimo as mo
 from obsidian_marimo import vault
 
-dune_text = await vault.read("library/Dune.md")
-first_heading = next(line for line in dune_text.split('\n') if line.startswith('# '))
+book_a_text = await vault.read("library/Book A.md")
+first_heading = next(line for line in book_a_text.split('\n') if line.startswith('# '))
 first_heading
 ```
 
@@ -24,9 +24,9 @@ Read multiple files at once. The cell below fetches all three book notes from th
 
 ```marimo
 book_paths = [
-    "library/Dune.md",
-    "library/Antifragile.md",
-    "library/The Pragmatic Programmer.md",
+    "library/Book A.md",
+    "library/Book B.md",
+    "library/Book C.md",
 ]
 book_texts = await vault.read_many(book_paths)
 result = {path: len(text) for path, text in zip(book_paths, book_texts)}

@@ -10,15 +10,15 @@ My personal collection of books worth reading and revisiting. I maintain this li
 
 ## Currently reading
 
-- [x] Start Dune
-- [ ] Finish Dune
-- [x] Begin Antifragile
-- [ ] Read The Pragmatic Programmer
-- [ ] Explore sci-fi recommendations
+- [x] Start Book A
+- [ ] Finish Book A
+- [x] Begin Book B
+- [ ] Read Book C
+- [ ] Explore fiction recommendations
 
 ## Books
 
-- [[Dune]]
-- [[Antifragile]]
-- [[The Pragmatic Programmer]]
-- [[Foundation]]
+- [[Book A]]
+- [[Book B]]
+- [[Book C]]
+- [[Book D]]
