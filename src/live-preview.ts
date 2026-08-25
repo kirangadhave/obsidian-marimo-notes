@@ -123,6 +123,47 @@ function marimoFences(state: EditorState): Fence[] {
 	return fences;
 }
 
+/**
+ * Parses marimo fences from raw file content, using the same grammar as the
+ * CodeMirror path. Preserves file order and duplicates. Used to extract fences
+ * from the active file's source, ensuring the cell set equals the fences
+ * regardless of what is visible in the DOM.
+ */
+export function parseMarimoFences(content: string): string[] {
+	const lines = content.split("\n");
+	const codes: string[] = [];
+	let lineNo = 0;
+	while (lineNo < lines.length) {
+		const line = lines[lineNo];
+		const open = line.match(/^(`{3,}|~{3,})/);
+		if (!open) {
+			lineNo++;
+			continue;
+		}
+		const marker = open[1];
+		const closeRe = new RegExp(`^\\${marker[0]}{${marker.length},}\\s*$`);
+		let closeNo = -1;
+		for (let j = lineNo + 1; j < lines.length; j++) {
+			if (closeRe.test(lines[j])) {
+				closeNo = j;
+				break;
+			}
+		}
+		if (closeNo === -1) {
+			break;
+		}
+		if (isMarimoFenceLine(line.trim())) {
+			const code =
+				closeNo > lineNo + 1
+					? lines.slice(lineNo + 1, closeNo).join("\n")
+					: "";
+			codes.push(code);
+		}
+		lineNo = closeNo + 1;
+	}
+	return codes;
+}
+
 function selectionTouches(state: EditorState, fence: Fence): boolean {
 	return state.selection.ranges.some(
 		(range) => range.from <= fence.to && range.to >= fence.from,

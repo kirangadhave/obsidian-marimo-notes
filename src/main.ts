@@ -14,7 +14,7 @@ import {
 } from "obsidian";
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
-import { MARIMO_MD_FENCE, marimoFenceField } from "./live-preview";
+import { MARIMO_MD_FENCE, marimoFenceField, parseMarimoFences } from "./live-preview";
 import {
 	VaultRpc,
 	type LinkGraph,
@@ -368,10 +368,23 @@ export default class MarimoPlugin extends Plugin {
 	 * Every runtime.initialize() call restarts the Python session, so calling
 	 * it on each render loops the kernel boot forever. Only (re)initialize
 	 * when the set of cells actually changed since the last initialization.
+	 *
+	 * Captures the active file and app id at entry to prevent races: if the
+	 * user switches notes during the async chain, later operations bail out
+	 * to avoid applying fences from the old file to the new app.
 	 */
 	private async initializeIslands() {
+		// Capture once at entry to avoid races during the async chain.
+		const capturedFile = this.app.workspace.getActiveFile();
+		const capturedAppId = this.getActiveNoteAppId();
+
 		this.markVisibleIslandsReactive();
-		this.ensureBootstrapIslands();
+		await this.ensureBootstrapIslands(capturedAppId, capturedFile);
+		// Remove understudies with reactive DOM twins BEFORE tryRebindIslands.
+		// This prevents tryRebindIslands from miscounting positions when both DOM
+		// and understudy exist. Must happen after markVisibleIslandsReactive so
+		// the DOM island is marked reactive and found by reconciliation.
+		this.reconcileUnderStudies(capturedAppId);
 		this.tryRebindIslands();
 		if (this.isCurrentDomInitialized()) {
 			this.snapshotCellIndexes();
@@ -400,6 +413,101 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	/**
+	 * Extracts all marimo fences from the given file's source, in file order.
+	 * Returns the fence codes, preserving duplicates for positional identity.
+	 * File must not be null.
+	 */
+	private async extractFileFences(file: TFile): Promise<string[]> {
+		const content = await this.app.vault.cachedRead(file);
+		return parseMarimoFences(content);
+	}
+
+	/**
+	 * Builds the cell entry identity for a given code, parameterized by appId.
+	 * Mirrors the encoding in cellEntries().
+	 */
+	private cellEntry(appId: string, code: string): string {
+		return `${appId}:${encodeURIComponent(code)}`;
+	}
+
+	/**
+	 * Checks if a reactive DOM island exists for the given entry.
+	 * Entry must be the already-encoded form: appId:encodeURIComponent(code).
+	 * Compares data-mo-code directly (already encoded) without re-encoding.
+	 */
+	private hasDomIslandForEntry(appId: string, entry: string): boolean {
+		return this.reactiveIslands().some(
+			(el) =>
+				el.getAttribute("data-app-id") === appId &&
+				`${appId}:${el.getAttribute("data-mo-code") ?? ""}` === entry,
+		);
+	}
+
+	/**
+	 * Ensures understudies exist for all file fences of the active app that
+	 * lack visible DOM islands. Understudies are reactive but hidden, placed in
+	 * the bootstrap container in file order. They allow off-screen cells to
+	 * remain part of the notebook, preventing re-initialization on scroll.
+	 *
+	 * WHY: When CodeMirror removes off-viewport widgets, the reactive island
+	 * set shrinks, triggering a full re-init that orphans off-screen cells.
+	 * Understudies keep the cell set stable: only file changes trigger re-init.
+	 */
+	private ensureUnderStudies(
+		appId: string | null,
+		fileFences: string[],
+		container: HTMLElement,
+	) {
+		if (!appId) {
+			return;
+		}
+
+		// Build the set of understudies that should exist.
+		const targetEntries = new Set<string>();
+		for (const code of fileFences) {
+			targetEntries.add(this.cellEntry(appId, code));
+		}
+
+		// Remove understudies for entries no longer in the file.
+		// WHY: data-mo-code is already encoded, so we compare directly.
+		for (const el of Array.from(container.children)) {
+			const elAppId = el.getAttribute("data-app-id");
+			const elCode = el.getAttribute("data-mo-code") ?? "";
+			if (elAppId !== appId || !el.hasAttribute("data-is-understudy")) {
+				continue;
+			}
+			const entry = `${appId}:${elCode}`;
+			if (!targetEntries.has(entry)) {
+				el.remove();
+			}
+		}
+
+		// Create understudies for entries missing both a DOM island and an understudy.
+		// WHY: data-mo-code is already encoded, so we build the entry directly.
+		const existingEntries = new Set<string>();
+		for (const el of Array.from(container.children)) {
+			const elAppId = el.getAttribute("data-app-id");
+			const elCode = el.getAttribute("data-mo-code") ?? "";
+			if (elAppId === appId && el.hasAttribute("data-is-understudy")) {
+				existingEntries.add(`${appId}:${elCode}`);
+			}
+		}
+
+		for (const code of fileFences) {
+			const entry = this.cellEntry(appId, code);
+			if (existingEntries.has(entry) || this.hasDomIslandForEntry(appId, entry)) {
+				continue;
+			}
+			const host = document.createElement("div");
+			host.innerHTML = islandHtml(appId, code, "");
+			const island = host.firstElementChild as HTMLElement;
+			island.setAttribute("data-reactive", "true");
+			island.setAttribute("data-is-understudy", "true");
+			container.appendChild(island);
+		}
+	}
+
+	/**
 	 * marimo's Pyodide runtime is a singleton per interpreter, so exactly one
 	 * app is live: the one the active note owns. A note that is visible but
 	 * not active stays static.
@@ -410,13 +518,17 @@ export default class MarimoPlugin extends Plugin {
 	 * is a duplicate-definitions error, so only the displayed copy joins. The
 	 * hidden view is display:none (offsetParent === null). The parser ignores
 	 * non-reactive islands.
+	 *
+	 * Understudies (hidden cells for off-screen fences) stay reactive even
+	 * when hidden, like bootstrap islands. This ensures the notebook contains
+	 * all file fences regardless of visibility.
 	 */
 	private markVisibleIslandsReactive() {
 		const activeNoteAppId = this.getActiveNoteAppId();
 		this.currentLiveAppId = activeNoteAppId;
 		for (const el of this.allIslands()) {
-			if (this.isBootstrapIsland(el)) {
-				continue; // handled by ensureBootstrapIslands
+			if (this.isBootstrapIsland(el) || el.hasAttribute("data-is-understudy")) {
+				continue; // handled by ensureBootstrapIslands and ensureUnderStudies
 			}
 			const isOwned = el.getAttribute("data-app-id") === activeNoteAppId;
 			const isVisible = el.offsetParent !== null;
@@ -429,8 +541,19 @@ export default class MarimoPlugin extends Plugin {
 	 * VAULT_BOOTSTRAP_CODE). The islands live in a plugin-owned hidden
 	 * container; they are reactive exactly when their app has visible cells,
 	 * and are removed when the app's islands are gone entirely.
+	 *
+	 * Also manages understudies: hidden reactive cells for off-screen file
+	 * fences, ensuring all fences are part of the notebook regardless of
+	 * viewport position.
+	 *
+	 * Takes the active app id and file as parameters to avoid races: if the
+	 * user switches notes during the async chain, we bail out to prevent
+	 * applying fences from the old file to the new app.
 	 */
-	private ensureBootstrapIslands() {
+	private async ensureBootstrapIslands(
+		capturedAppId: string | null,
+		capturedFile: TFile | null,
+	) {
 		if (!this.bootstrapContainer) {
 			// First element in <body>: the runtime assigns cell indexes in
 			// document order, and independent cells run in index order, so
@@ -466,12 +589,13 @@ export default class MarimoPlugin extends Plugin {
 			const appId = el.getAttribute("data-app-id") ?? "";
 			if (!allApps.has(appId)) {
 				el.remove();
-			} else {
+			} else if (!el.hasAttribute("data-is-understudy")) {
+				// Only update reactivity for bootstrap cells, not understudies.
 				el.setAttribute("data-reactive", String(visibleApps.has(appId)));
 			}
 		}
 		for (const appId of visibleApps) {
-			if (!container.querySelector(`[data-app-id="${appId}"]`)) {
+			if (!container.querySelector(`[data-app-id="${appId}"]:not([data-is-understudy])`)) {
 				const host = document.createElement("div");
 				host.innerHTML = islandHtml(appId, VAULT_BOOTSTRAP_CODE, "");
 				const island = host.firstElementChild as HTMLElement;
@@ -479,6 +603,17 @@ export default class MarimoPlugin extends Plugin {
 				container.appendChild(island);
 			}
 		}
+
+		// Ensure understudies for all file fences. Bail out if the active app
+		// has changed since we captured the app id (user switched notes).
+		if (this.getActiveNoteAppId() !== capturedAppId) {
+			return;
+		}
+		const fileFences = capturedFile ? await this.extractFileFences(capturedFile) : [];
+		if (this.getActiveNoteAppId() !== capturedAppId) {
+			return;
+		}
+		this.ensureUnderStudies(capturedAppId, fileFences, container);
 	}
 
 	private isBootstrapIsland(el: HTMLElement): boolean {
@@ -537,12 +672,17 @@ export default class MarimoPlugin extends Plugin {
 	 * the cell still lives in the running notebook — stamp the remembered
 	 * data-cell-idx and fire the runtime's source-changed event, and the
 	 * custom element re-renders the cell's current output from the store.
+	 *
+	 * Also removes understudies that now have corresponding DOM islands,
+	 * avoiding duplicate definitions.
 	 */
 	private tryRebindIslands() {
 		if (!customElements.get("marimo-island")) {
 			return; // runtime not booted yet — nothing to rebind to
 		}
 		const seen = new Map<string, number>();
+		const activeNoteAppId = this.getActiveNoteAppId();
+
 		for (const el of this.reactiveIslands()) {
 			const entry = `${el.getAttribute("data-app-id")}:${el.getAttribute("data-mo-code") ?? ""}`;
 			const position = seen.get(entry) ?? 0;
@@ -556,6 +696,76 @@ export default class MarimoPlugin extends Plugin {
 			}
 			el.setAttribute("data-cell-idx", String(idxs[position]));
 			el.dispatchEvent(new Event("marimo-island-source-changed"));
+		}
+
+		// Remove understudies that now have visible DOM islands.
+		// This prevents duplicate definitions when a cell scrolls back into view.
+		if (activeNoteAppId && this.bootstrapContainer) {
+			const domIslandEntries = new Set<string>();
+			for (const el of this.reactiveIslands()) {
+				if (!el.hasAttribute("data-is-understudy")) {
+					const appId = el.getAttribute("data-app-id");
+					const code = el.getAttribute("data-mo-code") ?? "";
+					if (appId === activeNoteAppId) {
+						domIslandEntries.add(`${appId}:${code}`);
+					}
+				}
+			}
+
+			for (const el of Array.from(this.bootstrapContainer.children)) {
+				if (!el.hasAttribute("data-is-understudy")) {
+					continue;
+				}
+				const appId = el.getAttribute("data-app-id");
+				const code = el.getAttribute("data-mo-code") ?? "";
+				const entry = `${appId}:${code}`;
+				if (appId === activeNoteAppId && domIslandEntries.has(entry)) {
+					el.remove();
+				}
+			}
+		}
+	}
+
+	/**
+	 * Ensures at most ONE reactive island exists per (appId, code) pair by
+	 * removing understudies that have reactive DOM twins. This runs BEFORE
+	 * restoreConsumedIslands and runtime initialization, preventing the runtime
+	 * from seeing duplicate definitions.
+	 *
+	 * WHY: ensureUnderStudies creates understudies for all fences to keep the
+	 * cell set stable. But if a DOM island exists and is already reactive, both
+	 * the DOM island and understudy end up reactive at initialization time,
+	 * causing "cell redefines variables" errors. Prefer the DOM copy (it carries
+	 * interactive widgets like sliders).
+	 */
+	private reconcileUnderStudies(appId: string | null) {
+		if (!appId || !this.bootstrapContainer) {
+			return;
+		}
+
+		// Build the set of reactive DOM island entries for this app.
+		const reactiveEntries = new Set<string>();
+		for (const el of this.reactiveIslands()) {
+			if (!el.hasAttribute("data-is-understudy")) {
+				const elAppId = el.getAttribute("data-app-id");
+				const elCode = el.getAttribute("data-mo-code") ?? "";
+				if (elAppId === appId) {
+					reactiveEntries.add(`${appId}:${elCode}`);
+				}
+			}
+		}
+
+		// Remove understudies with reactive DOM twins.
+		for (const el of Array.from(this.bootstrapContainer.children)) {
+			if (!el.hasAttribute("data-is-understudy")) {
+				continue;
+			}
+			const elAppId = el.getAttribute("data-app-id");
+			const elCode = el.getAttribute("data-mo-code") ?? "";
+			const entry = `${elAppId}:${elCode}`;
+			if (elAppId === appId && reactiveEntries.has(entry)) {
+				el.remove();
+			}
 		}
 	}
 
@@ -1199,6 +1409,46 @@ export default class MarimoPlugin extends Plugin {
 				}),
 			);
 		});
+	}
+
+	/**
+	 * Diagnostic dump for duplicate-copy issues. Paste the call into the
+	 * Obsidian console:
+	 *   app.plugins.plugins["marimo-islands"].debugIslands()
+	 * Reports every island for the active app: location, reactivity, cell index,
+	 * and first 40 chars of decoded code.
+	 */
+	debugIslands() {
+		const appId = this.getLiveAppId();
+		if (!appId) {
+			console.log("[marimo] No active app");
+			return;
+		}
+		const islands = this.allIslands();
+		const report: Array<{
+			source: string;
+			reactive: string;
+			cellIdx: string | null;
+			code: string;
+		}> = [];
+		for (const el of islands) {
+			if (el.getAttribute("data-app-id") !== appId) {
+				continue;
+			}
+			const source = this.isBootstrapIsland(el)
+				? "bootstrap-container"
+				: el.hasAttribute("data-is-understudy")
+					? "bootstrap-understudy"
+					: "view-dom";
+			const reactive = el.getAttribute("data-reactive") ?? "?";
+			const cellIdx = el.getAttribute("data-cell-idx");
+			const code = el.getAttribute("data-mo-code")
+				? decodeURIComponent(el.getAttribute("data-mo-code")!).substring(0, 40)
+				: "";
+			report.push({ source, reactive, cellIdx, code });
+		}
+		console.log(`[marimo] Islands for app ${appId} (active: ${this.currentLiveAppId === appId ? "yes" : "no"}):`);
+		console.table(report);
 	}
 }
 
