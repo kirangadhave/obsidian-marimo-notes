@@ -18,3 +18,7 @@ examples/demo-vault/.obsidian/core-plugins.json
 
 # machine-local Conductor config
 .conductor/settings.local.toml
+
+# demo vault write target: keep the explainer, ignore what the demos write
+examples/demo-vault/scratch/*
+!examples/demo-vault/scratch/About this folder.md
