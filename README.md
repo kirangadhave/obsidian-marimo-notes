@@ -87,6 +87,11 @@ via its worker shim.
   shadow roots adopt it), live-preview/reading-view DOM duplication (only the
   active note's islands join the live app), and recreated block DOM rebinding
   without a kernel restart (data-mo-code + cell index map).
+- A notebook renders in the runtime's light colors, whatever theme the vault
+  uses. The published runtime does not ship CSS `light-dark()` to the browser.
+  It rewrites its colors into a polyfill that reuses one variable name across
+  rules, so the background color reads a value that belongs to an unrelated
+  property. This one is not solved yet.
 - Islands are marked an early/experimental feature upstream.
 
 ## Vault access
