@@ -4,18 +4,25 @@ Obsidian plugin that renders [marimo](https://marimo.io) cells as live, reactive
 WASM islands inside notes. Python runs in-browser via Pyodide — no server, no
 local Python install.
 
+<p align="center">
+  <img src="assets/screenshot-desktop.png" alt="A demo vault note with a live slider cell and a dependent cell re-running" width="720" />
+</p>
+
+<p align="center">
+  <img src="assets/screenshot-mobile.png" alt="The same reactive cells running in Obsidian on a phone" width="320" />
+</p>
+
 ## Install
 
-A community plugin directory listing is submitted and pending review. Until
-it lands, install with one of these two methods:
+Install "marimo notes" from Obsidian's community plugin directory:
+Settings → Community plugins → Browse → search "marimo notes", or open
+[the listing](https://obsidian.md/plugins?id=marimo-notes).
 
-- **BRAT**: install the [BRAT](https://obsidian.md/plugins?id=obsidian42-brat)
-  plugin, then add `kirangadhave/obsidian-marimo-notes` as a beta plugin.
-  BRAT keeps the plugin updated from GitHub releases.
-- **Manual**: download `main.js`, `manifest.json`, and `styles.css` from the
-  [latest release](https://github.com/kirangadhave/obsidian-marimo-notes/releases/latest)
-  into `<vault>/.obsidian/plugins/marimo-notes/`, then enable "marimo notes"
-  in Settings → Community plugins.
+To install a release by hand instead: download `main.js`, `manifest.json`,
+and `styles.css` from the
+[latest release](https://github.com/kirangadhave/obsidian-marimo-notes/releases/latest)
+into `<vault>/.obsidian/plugins/marimo-notes/`, then enable "marimo notes"
+in Settings → Community plugins.
 
 ## Usage
 
