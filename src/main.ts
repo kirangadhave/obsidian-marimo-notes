@@ -12,7 +12,6 @@ import {
 	type SettingDefinitionControl,
 	TAbstractFile,
 	TFile,
-	TFolder,
 } from "obsidian";
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
@@ -222,7 +221,11 @@ export default class MarimoPlugin extends Plugin {
 	private currentLiveAppId: string | null = null;
 
 	async onload() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			(await this.loadData()) as Partial<MarimoPluginSettings> | null,
+		);
 
 		const adapter = this.app.vault.adapter;
 		this.symlinkChecker = new SymlinkChecker(
@@ -1036,8 +1039,6 @@ export default class MarimoPlugin extends Plugin {
 			"port" in data &&
 			data.port instanceof MessagePort
 		) {
-			const adapter = this.app.vault.adapter;
-
 			const host: VaultRpcHost = {
 				getFiles: () =>
 					this.app.vault.getFiles().map((f) => ({
@@ -1245,7 +1246,9 @@ export default class MarimoPlugin extends Plugin {
 		let frontmatter: Record<string, unknown> = {};
 		if (cache?.frontmatter) {
 			try {
-				frontmatter = JSON.parse(JSON.stringify(cache.frontmatter));
+				frontmatter = JSON.parse(
+					JSON.stringify(cache.frontmatter),
+				) as Record<string, unknown>;
 			} catch {
 				// User frontmatter can be arbitrary YAML with cyclic values.
 			}
@@ -1453,15 +1456,14 @@ export default class MarimoPlugin extends Plugin {
 	/**
 	 * Diagnostic dump for duplicate-copy issues. Paste the call into the
 	 * Obsidian console:
-	 *   app.plugins.plugins["marimo-notes"].debugIslands()
-	 * Reports every island for the active app: location, reactivity, cell index,
+	 *   console.table(app.plugins.plugins["marimo-notes"].debugIslands().islands)
+	 * Returns every island for the active app: location, reactivity, cell index,
 	 * and first 40 chars of decoded code.
 	 */
 	debugIslands() {
 		const appId = this.getLiveAppId();
 		if (!appId) {
-			console.log("[marimo] No active app");
-			return;
+			return "No active app";
 		}
 		const islands = this.allIslands();
 		const report: Array<{
@@ -1486,8 +1488,11 @@ export default class MarimoPlugin extends Plugin {
 				: "";
 			report.push({ source, reactive, cellIdx, code });
 		}
-		console.log(`[marimo] Islands for app ${appId} (active: ${this.currentLiveAppId === appId ? "yes" : "no"}):`);
-		console.table(report);
+		return {
+			appId,
+			active: this.currentLiveAppId === appId,
+			islands: report,
+		};
 	}
 }
 
@@ -1531,8 +1536,7 @@ function buildIslandNode(
 	// Import the finished subtree into the real document. importNode creates
 	// a copy and triggers custom element upgrade on connection (with children
 	// already present, which is the required state).
-	const imported = document.importNode(island, true) as HTMLElement;
-	return imported;
+	return document.importNode(island, true);
 }
 
 /**
