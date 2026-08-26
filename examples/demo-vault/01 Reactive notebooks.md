@@ -4,12 +4,20 @@ This notebook teaches three ideas. First, move a slider to re-run dependent cell
 
 Drag the slider below. Watch how the output below changes.
 
+```python
+import marimo as mo
+slider = mo.ui.slider(1, 10, value=3)
+slider
+```
 ```marimo
 import marimo as mo
 slider = mo.ui.slider(1, 10, value=3)
 slider
 ```
 
+```python
+mo.md("★" * slider.value)
+```
 ```marimo
 mo.md("★" * slider.value)
 ```
