@@ -206,7 +206,7 @@ export default class MarimoPlugin extends Plugin {
 	settings: MarimoPluginSettings = DEFAULT_SETTINGS;
 	symlinkChecker: SymlinkChecker | null = null;
 	private runtime: Promise<IslandsRuntime> | null = null;
-	private styleEl: HTMLElement | null = null;
+	private runtimeStylesheet: CSSStyleSheet | null = null;
 	private initTimer: number | null = null;
 	private bootstrapContainer: HTMLElement | null = null;
 	private workerPatched = false;
@@ -291,7 +291,12 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	onunload() {
-		this.styleEl?.remove();
+		if (this.runtimeStylesheet) {
+			document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
+				(sheet) => sheet !== this.runtimeStylesheet,
+			);
+			this.runtimeStylesheet = null;
+		}
 		if (this.initTimer !== null) {
 			window.clearTimeout(this.initTimer);
 		}
@@ -319,19 +324,16 @@ export default class MarimoPlugin extends Plugin {
 		// ancestor; mirror Obsidian's theme onto the island container.
 		wrapper.classList.toggle("dark", document.body.hasClass("theme-dark"));
 
-		// Built via innerHTML on purpose: once the runtime has defined the
-		// marimo-island custom element, document.createElement() would run its
-		// constructor and throw ("the result must not have attributes") —
-		// parser-created elements take the upgrade path, which is allowed.
 		// All cells from the same note share one app id, i.e. one reactive
 		// notebook: a slider in one block reruns dependent blocks below it.
 		const appId = appIdForPath(sourcePath);
 		this.appIdToPath.set(appId, sourcePath);
-		wrapper.innerHTML = islandHtml(
+		const island = buildIslandNode(
 			appId,
 			code,
 			this.loaderText(),
 		);
+		wrapper.appendChild(island);
 		this.scheduleInitialize();
 	}
 
@@ -521,9 +523,7 @@ export default class MarimoPlugin extends Plugin {
 			if (existingEntries.has(entry) || this.hasDomIslandForEntry(appId, entry)) {
 				continue;
 			}
-			const host = document.createElement("div");
-			host.innerHTML = islandHtml(appId, code, "");
-			const island = host.firstElementChild as HTMLElement;
+			const island = buildIslandNode(appId, code, "");
 			island.setAttribute("data-reactive", "true");
 			island.setAttribute("data-is-understudy", "true");
 			container.appendChild(island);
@@ -619,9 +619,7 @@ export default class MarimoPlugin extends Plugin {
 		}
 		for (const appId of visibleApps) {
 			if (!container.querySelector(`[data-app-id="${appId}"]:not([data-is-understudy])`)) {
-				const host = document.createElement("div");
-				host.innerHTML = islandHtml(appId, VAULT_BOOTSTRAP_CODE, "");
-				const island = host.firstElementChild as HTMLElement;
+				const island = buildIslandNode(appId, VAULT_BOOTSTRAP_CODE, "");
 				island.setAttribute("data-reactive", "true");
 				container.appendChild(island);
 			}
@@ -815,13 +813,11 @@ export default class MarimoPlugin extends Plugin {
 			if (!appId || !code || el.querySelector("marimo-cell-code")) {
 				continue;
 			}
-			const host = el.ownerDocument.createElement("div");
-			host.innerHTML = islandHtml(
+			const fresh = buildIslandNode(
 				appId,
 				decodeURIComponent(code),
 				this.loaderText(),
 			);
-			const fresh = host.firstElementChild as HTMLElement;
 			fresh.setAttribute("data-reactive", "true");
 			el.replaceWith(fresh);
 		}
@@ -834,6 +830,13 @@ export default class MarimoPlugin extends Plugin {
 	 * widget and beat marimo's layered Tailwind utilities (icon buttons become
 	 * gray pills). Remove any adopted sheet that contains Obsidian-specific
 	 * selectors. Runs on an interval because widgets mount continuously.
+	 *
+	 * Also adopts the runtime stylesheet (which has no title and is not found
+	 * by marimo's own copy-into-shadow-root mechanism) into each shadow root.
+	 * The cascade order: adopted sheets render first, then marimo's copies of
+	 * titled document sheets. Marimo's Tailwind utilities (tagged with @layer
+	 * utilities) beat any marimo* sheet with identical specificity, so adopted
+	 * sheets placed earlier do not disrupt their cascade ranking.
 	 */
 	private scrubShadowStyles(root: Document | ShadowRoot) {
 		const els = root.querySelectorAll<HTMLElement>("*");
@@ -850,6 +853,12 @@ export default class MarimoPlugin extends Plugin {
 				if (isObsidianSheet(sheet)) {
 					sheet.replaceSync("");
 				}
+			}
+			// Adopt the runtime stylesheet into this shadow root if not already present.
+			// Guard against double-adoption: the sheet object identity is the same
+			// across all future widgets, so do not add it twice.
+			if (this.runtimeStylesheet && !sr.adoptedStyleSheets.includes(this.runtimeStylesheet)) {
+				sr.adoptedStyleSheets = [...sr.adoptedStyleSheets, this.runtimeStylesheet];
 			}
 			this.scrubShadowStyles(sr);
 		}
@@ -971,20 +980,19 @@ export default class MarimoPlugin extends Plugin {
 
 	/**
 	 * Obsidian's CSP only allows 'self' and inline styles, so a CDN <link>
-	 * is refused. Inject the stylesheet text inline instead.
+	 * is refused. Create a constructable stylesheet and adopt it into the
+	 * document. Since adopted sheets do not carry a title attribute (marimo's
+	 * own copy-into-shadow-root mechanism will not find it there), the plugin
+	 * must patrol shadow roots and adopt this same sheet object into each.
+	 * See scrubShadowStyles.
 	 */
 	private injectStyles(css: string) {
-		if (this.styleEl) {
+		if (this.runtimeStylesheet) {
 			return;
 		}
-		// The title is load-bearing: marimo copies document stylesheets into
-		// each widget's shadow root, but only sheets titled "marimo*" (or with
-		// an @marimo-team href, which an inline style lacks). Untitled, every
-		// widget renders unstyled — e.g. sliders collapse to nothing.
-		this.styleEl = document.head.createEl("style", {
-			attr: { title: "marimo-notes" },
-			text: css,
-		});
+		this.runtimeStylesheet = new CSSStyleSheet();
+		this.runtimeStylesheet.replaceSync(css);
+		document.adoptedStyleSheets = [...document.adoptedStyleSheets, this.runtimeStylesheet];
 	}
 
 	/** Current loader message, derived from the observed boot stage. */
@@ -1484,24 +1492,47 @@ export default class MarimoPlugin extends Plugin {
 }
 
 /**
- * The islands DOM contract, plus data-mo-code: a plugin-owned copy of the
- * cell source that survives the runtime consuming the child elements.
- * data-reactive starts false; markVisibleIslandsReactive() enables exactly
- * one view's copy before each runtime initialization. encodeURIComponent
- * output is HTML-safe.
+ * Build the islands DOM contract without innerHTML or early custom element
+ * upgrade. Create elements in a separate document where custom elements never
+ * upgrade, then import the finished subtree into the real DOM with children
+ * already present. Once the runtime has defined the marimo-island custom
+ * element, document.createElement() in the main document would immediately
+ * run its constructor, which forbids attributes at construction time.
+ * Parser-created elements (here, imported from a separate doc) take the
+ * upgrade path, which allows attributes and children to be set before upgrade.
+ *
+ * The runtime discovers islands via initialize() scan, not via upgrade
+ * callbacks, so having children present at connection time is what matters.
+ * Returns a node ready to append or import into the real document.
  */
-function islandHtml(
+function buildIslandNode(
 	appId: string,
 	code: string,
 	loadingText: string,
-): string {
+): HTMLElement {
 	const encoded = encodeURIComponent(code);
-	return (
-		`<marimo-island data-app-id="${appId}" data-reactive="false" data-mo-code="${encoded}">` +
-		`<marimo-cell-output>${loadingHtml(loadingText)}</marimo-cell-output>` +
-		`<marimo-cell-code hidden>${encoded}</marimo-cell-code>` +
-		`</marimo-island>`
-	);
+	// Create elements in a separate document so custom elements never upgrade.
+	const doc = document.implementation.createHTMLDocument("");
+
+	const island = doc.createElement("marimo-island");
+	island.setAttribute("data-app-id", appId);
+	island.setAttribute("data-reactive", "false");
+	island.setAttribute("data-mo-code", encoded);
+
+	const cellOutput = doc.createElement("marimo-cell-output");
+	cellOutput.appendChild(buildLoadingNode(doc, loadingText));
+	island.appendChild(cellOutput);
+
+	const cellCode = doc.createElement("marimo-cell-code");
+	cellCode.setAttribute("hidden", "");
+	cellCode.textContent = encoded;
+	island.appendChild(cellCode);
+
+	// Import the finished subtree into the real document. importNode creates
+	// a copy and triggers custom element upgrade on connection (with children
+	// already present, which is the required state).
+	const imported = document.importNode(island, true) as HTMLElement;
+	return imported;
 }
 
 /**
@@ -1516,15 +1547,34 @@ const BOOT_STAGES = [
 	"Running cells…",
 ];
 
-function loadingHtml(text: string): string {
-	return (
-		`<div class="marimo-island-loading">` +
-		`<img class="marimo-loading-logo" src="${marimoLogo}" alt="" />` +
-		`<div class="marimo-loading-body">` +
-		`<span class="marimo-loading-text">${text}</span>` +
-		`<div class="marimo-loading-bar"><div class="marimo-loading-bar-fill"></div></div>` +
-		`</div></div>`
-	);
+function buildLoadingNode(doc: Document, text: string): HTMLElement {
+	const loading = doc.createElement("div");
+	loading.className = "marimo-island-loading";
+
+	const logo = doc.createElement("img");
+	logo.className = "marimo-loading-logo";
+	logo.setAttribute("src", marimoLogo);
+	logo.setAttribute("alt", "");
+	loading.appendChild(logo);
+
+	const body = doc.createElement("div");
+	body.className = "marimo-loading-body";
+	loading.appendChild(body);
+
+	const label = doc.createElement("span");
+	label.className = "marimo-loading-text";
+	label.textContent = text;
+	body.appendChild(label);
+
+	const bar = doc.createElement("div");
+	bar.className = "marimo-loading-bar";
+	body.appendChild(bar);
+
+	const fill = doc.createElement("div");
+	fill.className = "marimo-loading-bar-fill";
+	bar.appendChild(fill);
+
+	return loading;
 }
 
 const sheetVerdicts = new WeakMap<CSSStyleSheet, boolean>();
