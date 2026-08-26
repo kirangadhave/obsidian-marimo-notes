@@ -46,4 +46,4 @@ heading_count = len(self_note.headings)
 heading_count
 ```
 
-See the [Vault access section](https://github.com/kirangadhave/obsidian-marimo#vault-access) in the README for the full list of `Note` attributes.
+See the [Vault access section](https://github.com/kirangadhave/obsidian-marimo-notes#vault-access) in the README for the full list of `Note` attributes.
