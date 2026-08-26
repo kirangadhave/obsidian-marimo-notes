@@ -35,6 +35,9 @@ jobs:
 
       - name: Tag the release commit
         run: |
+          # An annotated tag needs a committer identity, which the runner lacks.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898604+github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" -m "$VERSION"
           git push origin "$VERSION"
 
