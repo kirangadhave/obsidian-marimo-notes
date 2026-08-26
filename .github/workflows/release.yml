@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -33,6 +35,14 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+
       - name: Tag the release commit
         run: |
           # An annotated tag needs a committer identity, which the runner lacks.
@@ -45,4 +55,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$VERSION" --title "$VERSION" --draft main.js manifest.json styles.css
+          gh release create "$VERSION" --title "$VERSION" --draft --generate-notes main.js manifest.json styles.css
