@@ -64,6 +64,6 @@ temp_gone = await vault.exists("scratch/temp.md")
 mo.md(f"File exists after trash: {temp_gone}")
 ```
 
-The write debounce window is 500 milliseconds per path. The promise resolves when the write lands in the vault, not when the call is accepted. An unchanged text write is skipped. Read the README section [Debounce behavior](https://github.com/kirangadhave/obsidian-marimo#debounce-behavior) for details.
+The write debounce window is 500 milliseconds per path. The promise resolves when the write lands in the vault, not when the call is accepted. An unchanged text write is skipped. Read the README section [Debounce behavior](https://github.com/kirangadhave/obsidian-marimo-notes#debounce-behavior) for details.
 
 Everything this note writes lands in `scratch/`. Git ignores the scratch folder, so deleting it is safe. You can clean up after experimenting.

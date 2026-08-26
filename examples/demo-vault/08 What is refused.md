@@ -1,6 +1,6 @@
 # What is refused
 
-Markdown is executable in many vaults through plugins like Dataview and Templater. The validator cannot block this without blocking `.md`, and writing markdown is the point. Read a notebook from someone else before you run it. See the README [Threat model](https://github.com/kirangadhave/obsidian-marimo#threat-model) for details.
+Markdown is executable in many vaults through plugins like Dataview and Templater. The validator cannot block this without blocking `.md`, and writing markdown is the point. Read a notebook from someone else before you run it. See the README [Threat model](https://github.com/kirangadhave/obsidian-marimo-notes#threat-model) for details.
 
 ```marimo
 import marimo as mo
@@ -74,4 +74,4 @@ err_missing = await refused(vault.trash("nonexistent/file.md"))
 mo.md(f"**Code:** `{err_missing.code}`\n\n**Message:** {err_missing.message}")
 ```
 
-The plugin rejects writes through symlinked folders when the setting "Allow writes through symlinked folders" is off. See the README section [Symlink setting](https://github.com/kirangadhave/obsidian-marimo#symlink-setting) to enable this rule or turn it off.
+The plugin rejects writes through symlinked folders when the setting "Allow writes through symlinked folders" is off. See the README section [Symlink setting](https://github.com/kirangadhave/obsidian-marimo-notes#symlink-setting) to enable this rule or turn it off.
