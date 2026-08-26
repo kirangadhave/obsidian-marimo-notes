@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VAULT="$ROOT/examples/demo-vault"
-PLUGIN_LINK="$VAULT/.obsidian/plugins/marimo-islands"
+PLUGIN_LINK="$VAULT/.obsidian/plugins/marimo-notes"
 
 if [[ ! -f "$ROOT/main.js" ]]; then
 	echo "main.js missing — building plugin first"
@@ -20,7 +20,7 @@ mkdir -p "$ROOT/.context"
 [[ -e "$ROOT/.context/vault" ]] || ln -s ../examples/demo-vault "$ROOT/.context/vault"
 
 if [[ ! -f "$VAULT/.obsidian/community-plugins.json" ]]; then
-	echo '["marimo-islands"]' > "$VAULT/.obsidian/community-plugins.json"
+	echo '["marimo-notes"]' > "$VAULT/.obsidian/community-plugins.json"
 fi
 
 DEMO="$VAULT/marimo demo.md"

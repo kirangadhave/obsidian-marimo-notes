@@ -1,4 +1,4 @@
-# marimo islands
+# marimo notes
 
 Obsidian plugin that renders [marimo](https://marimo.io) cells as live, reactive
 WASM islands inside notes. Python runs in-browser via Pyodide — no server, no
@@ -83,7 +83,7 @@ via its worker shim.
   CDN at runtime — vendoring covers the marimo core only.
 - Obsidian quirks handled by the plugin (see comments in `src/main.ts`):
   Electron's `process` in workers breaks Pyodide's environment detection
-  (worker shim), CSP blocks remote styles (inlined, titled "marimo-islands" so
+  (worker shim), CSP blocks remote styles (inlined, titled "marimo-notes" so
   shadow roots adopt it), live-preview/reading-view DOM duplication (only the
   active note's islands join the live app), and recreated block DOM rebinding
   without a kernel restart (data-mo-code + cell index map).
@@ -337,7 +337,7 @@ pnpm vault  # scaffold + open the demo vault (examples/demo-vault) in Obsidian
 `pnpm vault` symlinks the plugin into the test vault and opens it via the
 `obsidian://` URL scheme; on first open, choose "Trust author and enable
 plugins". For any other vault, symlink this folder into
-`<vault>/.obsidian/plugins/marimo-islands/` and enable "marimo islands" in
+`<vault>/.obsidian/plugins/marimo-notes/` and enable "marimo notes" in
 Community plugins.
 The "Reinitialize notebooks in open notes" command forces a re-scan.
 
