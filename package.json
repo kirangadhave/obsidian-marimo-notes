@@ -1,6 +1,6 @@
 {
-	"name": "marimo-islands",
-	"version": "0.1.0",
+	"name": "marimo-notes",
+	"version": "0.2.0",
 	"description": "Run marimo notebooks as live, reactive Python cells inside your notes. Python runs in-browser via Pyodide.",
 	"main": "main.js",
 	"packageManager": "pnpm@9.1.1",

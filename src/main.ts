@@ -960,7 +960,7 @@ export default class MarimoPlugin extends Plugin {
 		// an @marimo-team href, which an inline style lacks). Untitled, every
 		// widget renders unstyled — e.g. sliders collapse to nothing.
 		this.styleEl = document.head.createEl("style", {
-			attr: { title: "marimo-islands" },
+			attr: { title: "marimo-notes" },
 			text: css,
 		});
 	}
@@ -1414,7 +1414,7 @@ export default class MarimoPlugin extends Plugin {
 	/**
 	 * Diagnostic dump for duplicate-copy issues. Paste the call into the
 	 * Obsidian console:
-	 *   app.plugins.plugins["marimo-islands"].debugIslands()
+	 *   app.plugins.plugins["marimo-notes"].debugIslands()
 	 * Reports every island for the active app: location, reactivity, cell index,
 	 * and first 40 chars of decoded code.
 	 */

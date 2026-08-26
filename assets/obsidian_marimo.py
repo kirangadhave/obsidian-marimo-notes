@@ -196,7 +196,7 @@ class _VaultPort:
             if loop.time() - start > timeout:
                 raise VaultError(
                     "port_unavailable",
-                    "Vault port not ready. The marimo islands plugin may be broken.",
+                    "Vault port not ready. The marimo notes plugin may be broken.",
                 )
 
             await asyncio.sleep(0.05)
