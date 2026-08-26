@@ -90,8 +90,12 @@ via its worker shim.
 - A notebook renders in the runtime's light colors, whatever theme the vault
   uses. The published runtime does not ship CSS `light-dark()` to the browser.
   It rewrites its colors into a polyfill that reuses one variable name across
-  rules, so the background color reads a value that belongs to an unrelated
-  property. This one is not solved yet.
+  rules, so a color can read a value that belongs to an unrelated property.
+  This one is not solved yet.
+- The same polyfill can misrender single colors in a light vault: dict output
+  keys can paint near-white on white, and a table row can paint dark. A reload
+  of the note usually clears it. The copy button on dict output floats over
+  the text.
 - Islands are marked an early/experimental feature upstream.
 
 ## Vault access
