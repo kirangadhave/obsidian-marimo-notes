@@ -1,11 +1,12 @@
 name: Release
 
+# Releases the version already on the default branch. Release prep (version
+# bump + islands pin) lands through a normal PR first:
+#   node scripts/pin-islands.mjs
+#   node scripts/version-bump.mjs <x.y.z>
+# This workflow never commits or pushes to the branch.
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version (x.y.z, becomes the tag)"
-        required: true
 
 permissions:
   contents: write
@@ -13,8 +14,6 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,22 +27,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Set release version
-        run: node scripts/version-bump.mjs "$VERSION"
-
-      - name: Pin islands runtime to the latest marimo release
-        run: node scripts/pin-islands.mjs
+      - name: Read version from manifest
+        run: node -p "'VERSION=' + require('./manifest.json').version" >> "$GITHUB_ENV"
 
       - name: Build
         run: pnpm build
-
-      - name: Commit version bump and islands pin
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json manifest.json versions.json src/main.ts
-          git diff --cached --quiet || git commit -m "chore: release $VERSION"
-          git push
 
       - name: Tag the release commit
         run: |

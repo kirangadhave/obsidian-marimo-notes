@@ -1,11 +1,27 @@
 import {
+	App,
+	FileSystemAdapter,
+	getAllTags,
 	MarkdownPostProcessorContext,
 	Notice,
 	Plugin,
+	PluginSettingTab,
 	requestUrl,
+	Setting,
+	TAbstractFile,
+	TFile,
+	TFolder,
 } from "obsidian";
 import marimoLogo from "../assets/marimo-logo.png";
 import obsidianPy from "../assets/obsidian_marimo.py";
+import { MARIMO_MD_FENCE, marimoFenceField, parseMarimoFences } from "./live-preview";
+import {
+	VaultRpc,
+	type LinkGraph,
+	type NoteEntry,
+	type VaultEvent,
+	type VaultRpcHost,
+} from "./vault-rpc";
 
 /**
  * Pin the islands runtime to a marimo release. The runtime resolves its own
@@ -15,9 +31,17 @@ import obsidianPy from "../assets/obsidian_marimo.py";
 const ISLANDS_VERSION = "0.24.0";
 const CDN_BASE = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VERSION}/dist`;
 
+interface MarimoPluginSettings {
+	allowSymlinks: boolean;
+}
+
+const DEFAULT_SETTINGS: MarimoPluginSettings = {
+	allowSymlinks: false,
+};
+
 interface IslandsRuntime {
 	initialize(): Promise<void>;
-	stopApp(appId?: string): Promise<void>;
+	stopApp?(appId?: string): Promise<void>;
 }
 
 // esbuild outputs CJS, which rewrites `import()` to `require()`. Route the
@@ -27,8 +51,110 @@ const dynamicImport = new Function(
 	"return import(url)",
 ) as (url: string) => Promise<IslandsRuntime>;
 
-/** Matches marimo's markdown notebook fences: ```python {.marimo ...} */
-const MARIMO_MD_FENCE = /^(?:`{3,}|~{3,})\s*\{?python[\s.,]+[^}]*marimo/i;
+/**
+ * Checks symlink containment on desktop, with graceful degradation to no-op
+ * on mobile (where symlinks are not creatable inside the app sandbox).
+ * Caches results per parent folder.
+ */
+class SymlinkChecker {
+	private cache = new Map<string, boolean>();
+	private vaultBasePath: string;
+	private allowSymlinks: boolean;
+	private fs: typeof import("fs") | null = null;
+	private path: typeof import("path") | null = null;
+
+	constructor(vaultBasePath: string, allowSymlinks: boolean) {
+		this.vaultBasePath = vaultBasePath;
+		this.allowSymlinks = allowSymlinks;
+		this.initNodeModules();
+	}
+
+	private initNodeModules(): void {
+		try {
+			// Dynamic requires avoid bundling these into the mobile build.
+			// esbuild.config.mjs externalizes all builtins, so require returns
+			// the module or undefined on mobile where Node is unavailable.
+			this.fs = require("fs");
+			this.path = require("path");
+		} catch {
+			// Mobile path: Node unavailable, no-op returns true.
+		}
+	}
+
+	check(normalizedPath: string): boolean {
+		if (this.allowSymlinks) {
+			return true;
+		}
+
+		// Node is absent on mobile, where the adapter is not a filesystem
+		// adapter and the app sandbox cannot hold a symlink in the first
+		// place. Nothing to contain, so nothing to check.
+		if (!this.fs || !this.path || !this.vaultBasePath) {
+			return true;
+		}
+
+		const parentPath = this.path.dirname(normalizedPath);
+		const cached = this.cache.get(parentPath);
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		const result = this.checkPath(normalizedPath);
+		this.cache.set(parentPath, result);
+		return result;
+	}
+
+	private checkPath(normalizedPath: string): boolean {
+		if (!this.fs || !this.path) {
+			return true;
+		}
+
+		const fullPath = this.path.join(this.vaultBasePath, normalizedPath);
+		const parentPath = this.path.dirname(fullPath);
+
+		let ancestorPath = parentPath;
+		while (ancestorPath !== this.path.dirname(ancestorPath)) {
+			if (this.fs.existsSync(ancestorPath)) {
+				break;
+			}
+			ancestorPath = this.path.dirname(ancestorPath);
+		}
+
+		try {
+			return this.isContained(
+				this.fs.realpathSync(ancestorPath),
+				this.fs.realpathSync(this.vaultBasePath),
+			);
+		} catch {
+			// A path that cannot be resolved cannot be shown to be contained,
+			// and an unreadable answer must not become permission to write.
+			return false;
+		}
+	}
+
+	private isContained(ancestor: string, base: string): boolean {
+		if (!this.path) {
+			return false;
+		}
+		const relative = this.path.relative(base, ancestor);
+		// An empty result means the two are the same folder. A result that
+		// climbs, or that is absolute because the two sit on different
+		// Windows drives, means the target escaped the vault.
+		return (
+			relative === "" ||
+			(!relative.startsWith("..") && !this.path.isAbsolute(relative))
+		);
+	}
+
+	clearCache(): void {
+		this.cache.clear();
+	}
+
+	setAllowSymlinks(allow: boolean): void {
+		this.allowSymlinks = allow;
+		this.clearCache();
+	}
+}
 
 /** Obsidian's legacy CodeMirror mode registry (used for fence highlighting). */
 interface CodeMirrorLike {
@@ -54,10 +180,11 @@ if "obsidian_marimo" not in _sys.modules:
     _sys.modules["obsidian_marimo"] = _mod`;
 
 export default class MarimoPlugin extends Plugin {
+	settings: MarimoPluginSettings = DEFAULT_SETTINGS;
+	symlinkChecker: SymlinkChecker | null = null;
 	private runtime: Promise<IslandsRuntime> | null = null;
 	private styleEl: HTMLElement | null = null;
 	private initTimer: number | null = null;
-	private indexTimer: number | null = null;
 	private bootstrapContainer: HTMLElement | null = null;
 	private workerPatched = false;
 	private initializedCells = new Set<string>();
@@ -66,18 +193,37 @@ export default class MarimoPlugin extends Plugin {
 	private bootStage = 0;
 	private bootStageTs = Date.now();
 	private bootError: string | null = null;
+	private vaultRpc: VaultRpc | null = null;
+	private metadataCacheResolved: Promise<void> | null = null;
+	private appIdToPath = new Map<string, string>();
+	private currentLiveAppId: string | null = null;
 
 	async onload() {
-		// ```marimo fenced blocks → reactive island cells.
-		this.registerMarkdownCodeBlockProcessor("marimo", (source, el, ctx) => {
-			this.renderIsland(source, el, ctx);
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+
+		const adapter = this.app.vault.adapter;
+		this.symlinkChecker = new SymlinkChecker(
+			adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "",
+			this.settings.allowSymlinks,
+		);
+
+		this.addSettingTab(new MarimoSettingTab(this.app, this));
+
+		this.metadataCacheResolved = this.waitForMetadataCacheResolved();
+		this.watchVaultEvents();
+
+		// Both fence flavors — ```marimo and ```python {.marimo} — share one
+		// pipeline: this post-processor in reading view, the editor extension
+		// below in live preview. No code-block processor: registering one
+		// would make Obsidian wrap ```marimo fences in its own embed widget,
+		// a second widget system with its own edit chrome.
+		this.registerMarkdownPostProcessor((el, ctx) => {
+			this.upgradeMarimoBlocks(el, ctx);
 		});
 
-		// marimo's own notebook-as-markdown flavor: ```python {.marimo}.
-		// Runs after default rendering, so plain python blocks are untouched.
-		this.registerMarkdownPostProcessor((el, ctx) => {
-			this.upgradeMarimoPythonBlocks(el, ctx);
-		});
+		// The same flavor in live preview, where fences render as editor
+		// text and the post-processor above never runs.
+		this.registerEditorExtension(marimoFenceField(this));
 
 		// Refresh loader texts (catches the slow-first-boot hint in stage 1)
 		// and keep marimo widget shadow roots free of Obsidian's stylesheet.
@@ -104,24 +250,11 @@ export default class MarimoPlugin extends Plugin {
 			this.app.workspace.on("layout-change", () => this.scheduleInitialize()),
 		);
 		this.registerEvent(
-			this.app.workspace.on("active-leaf-change", () =>
-				this.scheduleInitialize(),
-			),
+			this.app.workspace.on("active-leaf-change", () => {
+				void this.stopOutgoingApp();
+				this.scheduleInitialize();
+			}),
 		);
-
-		// Maintain vault-index.json so notebooks can list the vault's files
-		// dynamically (app:// URLs cannot list directories). Rewritten on
-		// every vault change, debounced.
-		this.app.workspace.onLayoutReady(() => {
-			void this.writeVaultIndex();
-			for (const event of ["create", "delete", "rename", "modify"] as const) {
-				this.registerEvent(
-					this.app.vault.on(event as "modify", () =>
-						this.scheduleVaultIndex(),
-					),
-				);
-			}
-		});
 
 		this.addCommand({
 			id: "reinitialize",
@@ -131,6 +264,7 @@ export default class MarimoPlugin extends Plugin {
 				void this.initializeIslands();
 			},
 		});
+
 	}
 
 	onunload() {
@@ -138,6 +272,7 @@ export default class MarimoPlugin extends Plugin {
 		if (this.initTimer !== null) {
 			window.clearTimeout(this.initTimer);
 		}
+		this.vaultRpc?.flushOnUnload();
 	}
 
 	/** Builds the <marimo-island> DOM the islands runtime discovers on init. */
@@ -146,6 +281,11 @@ export default class MarimoPlugin extends Plugin {
 		el: HTMLElement,
 		ctx: MarkdownPostProcessorContext,
 	) {
+		this.buildIsland(el, source, ctx.sourcePath);
+	}
+
+	/** Shared island construction for reading view and live preview. */
+	buildIsland(el: HTMLElement, source: string, sourcePath: string) {
 		const code = source.trim();
 		if (!code) {
 			return;
@@ -162,8 +302,10 @@ export default class MarimoPlugin extends Plugin {
 		// parser-created elements take the upgrade path, which is allowed.
 		// All cells from the same note share one app id, i.e. one reactive
 		// notebook: a slider in one block reruns dependent blocks below it.
+		const appId = appIdForPath(sourcePath);
+		this.appIdToPath.set(appId, sourcePath);
 		wrapper.innerHTML = islandHtml(
-			appIdForPath(ctx.sourcePath),
+			appId,
 			code,
 			this.loaderText(),
 		);
@@ -171,25 +313,32 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	/**
-	 * Finds default-rendered ```python {.marimo} blocks and swaps them for
-	 * islands. The attribute lives in the fence info string, which Obsidian
-	 * drops during rendering, so it is re-read from the section source.
+	 * Finds default-rendered marimo blocks and swaps them for islands.
+	 * A ```marimo fence is recognizable by its language class alone. For
+	 * ```python {.marimo}, the attribute lives in the fence info string,
+	 * which Obsidian drops during rendering, so it is re-read from the
+	 * section source. Plain python blocks are untouched.
 	 */
-	private upgradeMarimoPythonBlocks(
+	private upgradeMarimoBlocks(
 		el: HTMLElement,
 		ctx: MarkdownPostProcessorContext,
 	) {
 		const codeBlocks = Array.from(
-			el.querySelectorAll<HTMLElement>("pre > code.language-python"),
+			el.querySelectorAll<HTMLElement>(
+				"pre > code.language-marimo, pre > code.language-python",
+			),
 		);
 		for (const codeBlock of codeBlocks) {
-			const section = ctx.getSectionInfo(codeBlock);
-			if (!section) {
-				continue;
-			}
-			const fenceLine = section.text.split("\n")[section.lineStart] ?? "";
-			if (!MARIMO_MD_FENCE.test(fenceLine.trim())) {
-				continue;
+			if (codeBlock.classList.contains("language-python")) {
+				const section = ctx.getSectionInfo(codeBlock);
+				if (!section) {
+					continue;
+				}
+				const fenceLine =
+					section.text.split("\n")[section.lineStart] ?? "";
+				if (!MARIMO_MD_FENCE.test(fenceLine.trim())) {
+					continue;
+				}
 			}
 			const pre = codeBlock.parentElement;
 			if (!pre?.parentElement) {
@@ -219,10 +368,23 @@ export default class MarimoPlugin extends Plugin {
 	 * Every runtime.initialize() call restarts the Python session, so calling
 	 * it on each render loops the kernel boot forever. Only (re)initialize
 	 * when the set of cells actually changed since the last initialization.
+	 *
+	 * Captures the active file and app id at entry to prevent races: if the
+	 * user switches notes during the async chain, later operations bail out
+	 * to avoid applying fences from the old file to the new app.
 	 */
 	private async initializeIslands() {
+		// Capture once at entry to avoid races during the async chain.
+		const capturedFile = this.app.workspace.getActiveFile();
+		const capturedAppId = this.getActiveNoteAppId();
+
 		this.markVisibleIslandsReactive();
-		this.ensureBootstrapIslands();
+		await this.ensureBootstrapIslands(capturedAppId, capturedFile);
+		// Remove understudies with reactive DOM twins BEFORE tryRebindIslands.
+		// This prevents tryRebindIslands from miscounting positions when both DOM
+		// and understudy exist. Must happen after markVisibleIslandsReactive so
+		// the DOM island is marked reactive and found by reconciliation.
+		this.reconcileUnderStudies(capturedAppId);
 		this.tryRebindIslands();
 		if (this.isCurrentDomInitialized()) {
 			this.snapshotCellIndexes();
@@ -251,20 +413,126 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	/**
-	 * Obsidian keeps the live-preview and reading-view DOMs alive at once,
-	 * each holding a copy of every island. marimo's Pyodide runtime is a
-	 * singleton per interpreter, so the duplicate cells must not all join the
-	 * app (duplicate definitions error, and two concurrent apps crash with
-	 * "RuntimeContext was already initialized"). The inactive view is
-	 * display:none (offsetParent === null); make only visible islands
-	 * reactive — the parser ignores non-reactive ones.
+	 * Extracts all marimo fences from the given file's source, in file order.
+	 * Returns the fence codes, preserving duplicates for positional identity.
+	 * File must not be null.
+	 */
+	private async extractFileFences(file: TFile): Promise<string[]> {
+		const content = await this.app.vault.cachedRead(file);
+		return parseMarimoFences(content);
+	}
+
+	/**
+	 * Builds the cell entry identity for a given code, parameterized by appId.
+	 * Mirrors the encoding in cellEntries().
+	 */
+	private cellEntry(appId: string, code: string): string {
+		return `${appId}:${encodeURIComponent(code)}`;
+	}
+
+	/**
+	 * Checks if a reactive DOM island exists for the given entry.
+	 * Entry must be the already-encoded form: appId:encodeURIComponent(code).
+	 * Compares data-mo-code directly (already encoded) without re-encoding.
+	 */
+	private hasDomIslandForEntry(appId: string, entry: string): boolean {
+		return this.reactiveIslands().some(
+			(el) =>
+				el.getAttribute("data-app-id") === appId &&
+				`${appId}:${el.getAttribute("data-mo-code") ?? ""}` === entry,
+		);
+	}
+
+	/**
+	 * Ensures understudies exist for all file fences of the active app that
+	 * lack visible DOM islands. Understudies are reactive but hidden, placed in
+	 * the bootstrap container in file order. They allow off-screen cells to
+	 * remain part of the notebook, preventing re-initialization on scroll.
+	 *
+	 * WHY: When CodeMirror removes off-viewport widgets, the reactive island
+	 * set shrinks, triggering a full re-init that orphans off-screen cells.
+	 * Understudies keep the cell set stable: only file changes trigger re-init.
+	 */
+	private ensureUnderStudies(
+		appId: string | null,
+		fileFences: string[],
+		container: HTMLElement,
+	) {
+		if (!appId) {
+			return;
+		}
+
+		// Build the set of understudies that should exist.
+		const targetEntries = new Set<string>();
+		for (const code of fileFences) {
+			targetEntries.add(this.cellEntry(appId, code));
+		}
+
+		// Remove understudies for entries no longer in the file.
+		// WHY: data-mo-code is already encoded, so we compare directly.
+		for (const el of Array.from(container.children)) {
+			const elAppId = el.getAttribute("data-app-id");
+			const elCode = el.getAttribute("data-mo-code") ?? "";
+			if (elAppId !== appId || !el.hasAttribute("data-is-understudy")) {
+				continue;
+			}
+			const entry = `${appId}:${elCode}`;
+			if (!targetEntries.has(entry)) {
+				el.remove();
+			}
+		}
+
+		// Create understudies for entries missing both a DOM island and an understudy.
+		// WHY: data-mo-code is already encoded, so we build the entry directly.
+		const existingEntries = new Set<string>();
+		for (const el of Array.from(container.children)) {
+			const elAppId = el.getAttribute("data-app-id");
+			const elCode = el.getAttribute("data-mo-code") ?? "";
+			if (elAppId === appId && el.hasAttribute("data-is-understudy")) {
+				existingEntries.add(`${appId}:${elCode}`);
+			}
+		}
+
+		for (const code of fileFences) {
+			const entry = this.cellEntry(appId, code);
+			if (existingEntries.has(entry) || this.hasDomIslandForEntry(appId, entry)) {
+				continue;
+			}
+			const host = document.createElement("div");
+			host.innerHTML = islandHtml(appId, code, "");
+			const island = host.firstElementChild as HTMLElement;
+			island.setAttribute("data-reactive", "true");
+			island.setAttribute("data-is-understudy", "true");
+			container.appendChild(island);
+		}
+	}
+
+	/**
+	 * marimo's Pyodide runtime is a singleton per interpreter, so exactly one
+	 * app is live: the one the active note owns. A note that is visible but
+	 * not active stays static.
+	 *
+	 * Visibility is the second half of the rule. Obsidian keeps the
+	 * live-preview and reading-view DOMs alive at once, each holding a copy of
+	 * every island, and displays one of them. Two copies of a cell in one app
+	 * is a duplicate-definitions error, so only the displayed copy joins. The
+	 * hidden view is display:none (offsetParent === null). The parser ignores
+	 * non-reactive islands.
+	 *
+	 * Understudies (hidden cells for off-screen fences) stay reactive even
+	 * when hidden, like bootstrap islands. This ensures the notebook contains
+	 * all file fences regardless of visibility.
 	 */
 	private markVisibleIslandsReactive() {
+		const activeNoteAppId = this.getActiveNoteAppId();
+		this.currentLiveAppId = activeNoteAppId;
 		for (const el of this.allIslands()) {
-			if (this.isBootstrapIsland(el)) {
-				continue; // handled by ensureBootstrapIslands
+			if (this.isBootstrapIsland(el) || el.hasAttribute("data-is-understudy")) {
+				continue; // handled by ensureBootstrapIslands and ensureUnderStudies
 			}
-			el.setAttribute("data-reactive", String(el.offsetParent !== null));
+			const isOwned = el.getAttribute("data-app-id") === activeNoteAppId;
+			const isVisible = el.offsetParent !== null;
+			el.setAttribute("data-reactive", String(isOwned && isVisible));
 		}
 	}
 
@@ -273,8 +541,19 @@ export default class MarimoPlugin extends Plugin {
 	 * VAULT_BOOTSTRAP_CODE). The islands live in a plugin-owned hidden
 	 * container; they are reactive exactly when their app has visible cells,
 	 * and are removed when the app's islands are gone entirely.
+	 *
+	 * Also manages understudies: hidden reactive cells for off-screen file
+	 * fences, ensuring all fences are part of the notebook regardless of
+	 * viewport position.
+	 *
+	 * Takes the active app id and file as parameters to avoid races: if the
+	 * user switches notes during the async chain, we bail out to prevent
+	 * applying fences from the old file to the new app.
 	 */
-	private ensureBootstrapIslands() {
+	private async ensureBootstrapIslands(
+		capturedAppId: string | null,
+		capturedFile: TFile | null,
+	) {
 		if (!this.bootstrapContainer) {
 			// First element in <body>: the runtime assigns cell indexes in
 			// document order, and independent cells run in index order, so
@@ -310,12 +589,13 @@ export default class MarimoPlugin extends Plugin {
 			const appId = el.getAttribute("data-app-id") ?? "";
 			if (!allApps.has(appId)) {
 				el.remove();
-			} else {
+			} else if (!el.hasAttribute("data-is-understudy")) {
+				// Only update reactivity for bootstrap cells, not understudies.
 				el.setAttribute("data-reactive", String(visibleApps.has(appId)));
 			}
 		}
 		for (const appId of visibleApps) {
-			if (!container.querySelector(`[data-app-id="${appId}"]`)) {
+			if (!container.querySelector(`[data-app-id="${appId}"]:not([data-is-understudy])`)) {
 				const host = document.createElement("div");
 				host.innerHTML = islandHtml(appId, VAULT_BOOTSTRAP_CODE, "");
 				const island = host.firstElementChild as HTMLElement;
@@ -323,6 +603,17 @@ export default class MarimoPlugin extends Plugin {
 				container.appendChild(island);
 			}
 		}
+
+		// Ensure understudies for all file fences. Bail out if the active app
+		// has changed since we captured the app id (user switched notes).
+		if (this.getActiveNoteAppId() !== capturedAppId) {
+			return;
+		}
+		const fileFences = capturedFile ? await this.extractFileFences(capturedFile) : [];
+		if (this.getActiveNoteAppId() !== capturedAppId) {
+			return;
+		}
+		this.ensureUnderStudies(capturedAppId, fileFences, container);
 	}
 
 	private isBootstrapIsland(el: HTMLElement): boolean {
@@ -381,12 +672,17 @@ export default class MarimoPlugin extends Plugin {
 	 * the cell still lives in the running notebook — stamp the remembered
 	 * data-cell-idx and fire the runtime's source-changed event, and the
 	 * custom element re-renders the cell's current output from the store.
+	 *
+	 * Also removes understudies that now have corresponding DOM islands,
+	 * avoiding duplicate definitions.
 	 */
 	private tryRebindIslands() {
 		if (!customElements.get("marimo-island")) {
 			return; // runtime not booted yet — nothing to rebind to
 		}
 		const seen = new Map<string, number>();
+		const activeNoteAppId = this.getActiveNoteAppId();
+
 		for (const el of this.reactiveIslands()) {
 			const entry = `${el.getAttribute("data-app-id")}:${el.getAttribute("data-mo-code") ?? ""}`;
 			const position = seen.get(entry) ?? 0;
@@ -401,6 +697,76 @@ export default class MarimoPlugin extends Plugin {
 			el.setAttribute("data-cell-idx", String(idxs[position]));
 			el.dispatchEvent(new Event("marimo-island-source-changed"));
 		}
+
+		// Remove understudies that now have visible DOM islands.
+		// This prevents duplicate definitions when a cell scrolls back into view.
+		if (activeNoteAppId && this.bootstrapContainer) {
+			const domIslandEntries = new Set<string>();
+			for (const el of this.reactiveIslands()) {
+				if (!el.hasAttribute("data-is-understudy")) {
+					const appId = el.getAttribute("data-app-id");
+					const code = el.getAttribute("data-mo-code") ?? "";
+					if (appId === activeNoteAppId) {
+						domIslandEntries.add(`${appId}:${code}`);
+					}
+				}
+			}
+
+			for (const el of Array.from(this.bootstrapContainer.children)) {
+				if (!el.hasAttribute("data-is-understudy")) {
+					continue;
+				}
+				const appId = el.getAttribute("data-app-id");
+				const code = el.getAttribute("data-mo-code") ?? "";
+				const entry = `${appId}:${code}`;
+				if (appId === activeNoteAppId && domIslandEntries.has(entry)) {
+					el.remove();
+				}
+			}
+		}
+	}
+
+	/**
+	 * Ensures at most ONE reactive island exists per (appId, code) pair by
+	 * removing understudies that have reactive DOM twins. This runs BEFORE
+	 * restoreConsumedIslands and runtime initialization, preventing the runtime
+	 * from seeing duplicate definitions.
+	 *
+	 * WHY: ensureUnderStudies creates understudies for all fences to keep the
+	 * cell set stable. But if a DOM island exists and is already reactive, both
+	 * the DOM island and understudy end up reactive at initialization time,
+	 * causing "cell redefines variables" errors. Prefer the DOM copy (it carries
+	 * interactive widgets like sliders).
+	 */
+	private reconcileUnderStudies(appId: string | null) {
+		if (!appId || !this.bootstrapContainer) {
+			return;
+		}
+
+		// Build the set of reactive DOM island entries for this app.
+		const reactiveEntries = new Set<string>();
+		for (const el of this.reactiveIslands()) {
+			if (!el.hasAttribute("data-is-understudy")) {
+				const elAppId = el.getAttribute("data-app-id");
+				const elCode = el.getAttribute("data-mo-code") ?? "";
+				if (elAppId === appId) {
+					reactiveEntries.add(`${appId}:${elCode}`);
+				}
+			}
+		}
+
+		// Remove understudies with reactive DOM twins.
+		for (const el of Array.from(this.bootstrapContainer.children)) {
+			if (!el.hasAttribute("data-is-understudy")) {
+				continue;
+			}
+			const elAppId = el.getAttribute("data-app-id");
+			const elCode = el.getAttribute("data-mo-code") ?? "";
+			const entry = `${elAppId}:${elCode}`;
+			if (elAppId === appId && reactiveEntries.has(entry)) {
+				el.remove();
+			}
+		}
 	}
 
 	/**
@@ -411,9 +777,16 @@ export default class MarimoPlugin extends Plugin {
 	 * rebuild consumed islands from the code retained in data-mo-code.
 	 * replaceWith cleanly unmounts the old element's React root via its
 	 * disconnectedCallback.
+	 *
+	 * Only reactive islands qualify. A rebuilt island shows the loader until
+	 * the runtime binds it, and the runtime binds reactive islands only, so
+	 * rebuilding any other island would replace real output with a loader
+	 * that nothing ever clears. The islands of a note the user is only
+	 * looking at keep the rendering they already have, which is what makes
+	 * them a static snapshot.
 	 */
 	private restoreConsumedIslands() {
-		for (const el of this.allIslands()) {
+		for (const el of this.reactiveIslands()) {
 			const appId = el.getAttribute("data-app-id");
 			const code = el.getAttribute("data-mo-code");
 			if (!appId || !code || el.querySelector("marimo-cell-code")) {
@@ -426,10 +799,7 @@ export default class MarimoPlugin extends Plugin {
 				this.loaderText(),
 			);
 			const fresh = host.firstElementChild as HTMLElement;
-			fresh.setAttribute(
-				"data-reactive",
-				el.getAttribute("data-reactive") ?? "false",
-			);
+			fresh.setAttribute("data-reactive", "true");
 			el.replaceWith(fresh);
 		}
 	}
@@ -470,6 +840,45 @@ export default class MarimoPlugin extends Plugin {
 		return this.allIslands().filter(
 			(el) => el.getAttribute("data-reactive") === "true",
 		);
+	}
+
+	private getActiveNoteAppId(): string | null {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			return null;
+		}
+		return appIdForPath(activeFile.path);
+	}
+
+	/**
+	 * Hands the interpreter to the newly active note. Stopping the outgoing
+	 * session destroys its Python bridge while the worker and Pyodide persist,
+	 * so a switch costs one session start and not a runtime reboot.
+	 */
+	private async stopOutgoingApp(): Promise<void> {
+		const outgoing = this.currentLiveAppId;
+		if (!outgoing || outgoing === this.getActiveNoteAppId()) {
+			return;
+		}
+		// Never boot the runtime just to stop an app that cannot be running.
+		if (!this.runtime) {
+			return;
+		}
+		try {
+			const runtime = await this.runtime;
+			await runtime.stopApp?.(outgoing);
+		} catch (error) {
+			console.warn("[marimo] failed to stop the outgoing app", error);
+		}
+	}
+
+	/**
+	 * The app the interpreter currently belongs to. An active note with no
+	 * islands owns no app, so the registry lookup is what makes this reliable.
+	 */
+	private getLiveAppId(): string | null {
+		const appId = this.getActiveNoteAppId();
+		return appId && this.appIdToPath.has(appId) ? appId : null;
 	}
 
 	/** Loads the islands runtime + stylesheet once per session. */
@@ -587,8 +996,69 @@ export default class MarimoPlugin extends Plugin {
 		this.updateLoaderTexts();
 	}
 
-	/** Observes worker→page RPC traffic to advance the boot stage. */
+	/** Observes worker messages to claim the vault RPC port and advance the boot stage. */
 	private onWorkerMessage(data: unknown) {
+		if (
+			data &&
+			typeof data === "object" &&
+			"op" in data &&
+			data.op === "__vault_port" &&
+			"port" in data &&
+			data.port instanceof MessagePort
+		) {
+			const adapter = this.app.vault.adapter;
+			let vaultBasePath = "";
+			if (typeof (adapter as any).getBasePath === "function") {
+				vaultBasePath = (adapter as any).getBasePath();
+			}
+
+			const host: VaultRpcHost = {
+				getFiles: () =>
+					this.app.vault.getFiles().map((f) => ({
+						path: f.path,
+						ext: f.extension,
+						size: f.stat.size,
+						mtime: f.stat.mtime,
+					})),
+				getNotes: async (folder?: string, tag?: string) =>
+					await this.buildNotes(folder, tag),
+				getLinks: async () => await this.buildLinks(),
+				getSelf: async () => await this.getSelfNote(),
+				getConfigDir: () => this.app.vault.configDir,
+				getAbstractFileByPath: (path: string) =>
+					this.app.vault.getAbstractFileByPath(path),
+				checkSymlinkContainment: (path: string) =>
+					this.symlinkChecker?.check(path) ?? false,
+				getLiveAppSourcePath: () => {
+					const liveAppId = this.getLiveAppId();
+					return liveAppId ? (this.appIdToPath.get(liveAppId) ?? null) : null;
+				},
+				createFolder: async (path: string) => {
+					await this.app.vault.createFolder(path);
+				},
+				cachedRead: (file: TAbstractFile) => this.app.vault.cachedRead(file as TFile),
+				create: async (path: string, data: string) => {
+					await this.app.vault.create(path, data);
+				},
+				createBinary: async (path: string, data: ArrayBuffer) => {
+					await this.app.vault.createBinary(path, data);
+				},
+				modify: (file: TAbstractFile, data: string) =>
+					this.app.vault.modify(file as TFile, data),
+				modifyBinary: (file: TAbstractFile, data: ArrayBuffer) =>
+					this.app.vault.modifyBinary(file as TFile, data),
+				process: (file: TFile, fn: (data: string) => string) =>
+					this.app.vault.process(file, fn),
+				processFrontmatter: (file: TFile, fn: (frontmatter: Record<string, unknown>) => void) =>
+					this.app.fileManager.processFrontMatter(file, fn),
+				trashFile: (file: TAbstractFile) =>
+					this.app.fileManager.trashFile(file),
+				exists: (path: string) => this.app.vault.adapter.exists(path),
+			};
+			this.vaultRpc = new VaultRpc(data.port, host);
+			return;
+		}
+
 		if (this.bootStage >= 3 && !this.bootError) {
 			return;
 		}
@@ -616,44 +1086,6 @@ export default class MarimoPlugin extends Plugin {
 	 * (a blob that ESM-imports the real worker module) to hide `process` before
 	 * the module evaluates, so Pyodide detects a browser worker.
 	 */
-	/**
-	 * Snapshot of the vault's markdown file index, taken at worker creation.
-	 * Python reads it via json.loads(str(js.__VAULT_FILES__)). For a live
-	 * view, fetch vault-index.json instead (see writeVaultIndex).
-	 */
-	private vaultFilesGlobal(): string {
-		return `globalThis.__VAULT_FILES__=${JSON.stringify(JSON.stringify(this.vaultFileIndex()))};`;
-	}
-
-	private vaultFileIndex() {
-		return this.app.vault.getMarkdownFiles().map((f) => ({
-			path: f.path,
-			size: f.stat.size,
-			mtime: f.stat.mtime,
-		}));
-	}
-
-	private scheduleVaultIndex() {
-		if (this.indexTimer !== null) {
-			window.clearTimeout(this.indexTimer);
-		}
-		this.indexTimer = window.setTimeout(() => {
-			this.indexTimer = null;
-			void this.writeVaultIndex();
-		}, 1000);
-	}
-
-	private async writeVaultIndex() {
-		try {
-			await this.app.vault.adapter.write(
-				`${this.manifest.dir}/vault-index.json`,
-				JSON.stringify(this.vaultFileIndex()),
-			);
-		} catch (error) {
-			console.warn("[marimo] failed to write vault index", error);
-		}
-	}
-
 	private patchWorkerForPyodide() {
 		if (this.workerPatched) {
 			return;
@@ -691,7 +1123,16 @@ export default class MarimoPlugin extends Plugin {
 							"try{delete globalThis.process}catch(e){}" +
 							"globalThis.process=undefined;" +
 							plugin.workerGlobals +
-							plugin.vaultFilesGlobal();
+							// A dedicated channel for vault traffic, so it
+							// never shares marimo's own RPC channel. Python
+							// reaches port1 through the worker global; port2
+							// is transferred to the page, which is the only
+							// way a port crosses a worker boundary.
+							"(function(){" +
+							"var c=new MessageChannel();" +
+							"globalThis.__VAULT_PORT1__=c.port1;" +
+							"globalThis.postMessage({op:'__vault_port',port:c.port2},[c.port2]);" +
+							"})();";
 						const shim = [
 							`import ${JSON.stringify(
 								`data:text/javascript;charset=utf-8,${encodeURIComponent(prelude)}`,
@@ -722,6 +1163,292 @@ export default class MarimoPlugin extends Plugin {
 			window.Worker = NativeWorker;
 		});
 		this.workerPatched = true;
+	}
+
+	private isCacheResolved(): boolean {
+		const files = this.app.vault.getMarkdownFiles();
+		const resolved = this.app.metadataCache.resolvedLinks;
+		return files.every((f) => f.path in resolved);
+	}
+
+	private async waitForMetadataCacheResolved(): Promise<void> {
+		if (this.isCacheResolved()) {
+			return;
+		}
+
+		return new Promise<void>((resolve) => {
+			let timer = 0;
+			const eventRef = this.app.metadataCache.on("resolved", () => {
+				if (this.isCacheResolved()) {
+					this.app.metadataCache.offref(eventRef);
+					window.clearTimeout(timer);
+					resolve();
+				}
+			});
+
+			// An answer from a half-built cache beats a call that never
+			// returns, so give up waiting rather than block the notebook.
+			timer = window.setTimeout(() => {
+				this.app.metadataCache.offref(eventRef);
+				console.warn(
+					"[marimo] metadata cache did not resolve in time, answering anyway",
+				);
+				resolve();
+			}, 30_000);
+		});
+	}
+
+	private buildNoteEntry(file: TFile): NoteEntry {
+		const cache = this.app.metadataCache.getFileCache(file);
+
+		const allTags = cache ? (getAllTags(cache) || []) : [];
+
+		let frontmatter: Record<string, unknown> = {};
+		if (cache?.frontmatter) {
+			try {
+				frontmatter = JSON.parse(JSON.stringify(cache.frontmatter));
+			} catch {
+				// User frontmatter can be arbitrary YAML with cyclic values.
+			}
+		}
+
+		const headings = (cache?.headings || []).map((h) => ({
+			heading: h.heading,
+			level: h.level,
+		}));
+
+		const linksArray: Array<{ link: string; target: string | null }> = [];
+		const unresolvedSet = new Set<string>();
+
+		if (cache) {
+			const allLinks = [
+				...(cache.links || []),
+				...(cache.embeds || []),
+				...(cache.frontmatterLinks || []),
+			];
+
+			for (const linkItem of allLinks) {
+				const linkText = linkItem.link.split(/[#^]/)[0];
+
+				if (!linkText) {
+					continue;
+				}
+
+				const target = this.app.metadataCache.getFirstLinkpathDest(
+					linkText,
+					file.path,
+				);
+
+				linksArray.push({
+					link: linkItem.link,
+					target: target ? target.path : null,
+				});
+
+				if (!target) {
+					unresolvedSet.add(linkItem.link);
+				}
+			}
+		}
+
+		const tasks: Array<{ done: boolean; line: number }> = [];
+		if (cache?.listItems) {
+			for (const item of cache.listItems) {
+				if (item.task !== undefined) {
+					tasks.push({
+						done: item.task !== " ",
+						line: item.position.start.line,
+					});
+				}
+			}
+		}
+
+		const blocks = cache?.blocks
+			? Object.keys(cache.blocks)
+			: [];
+
+		const parent = file.parent?.path ?? "";
+		const parentFolder = parent === "/" ? "" : parent;
+
+		return {
+			path: file.path,
+			name: file.basename,
+			folder: parentFolder,
+			size: file.stat.size,
+			ctime: file.stat.ctime,
+			mtime: file.stat.mtime,
+			frontmatter,
+			tags: allTags,
+			headings,
+			links: linksArray,
+			unresolved: Array.from(unresolvedSet),
+			tasks,
+			blocks,
+		};
+	}
+
+	private async buildNotes(folder?: string, tag?: string): Promise<NoteEntry[]> {
+		await this.metadataCacheResolved;
+
+		const notes: NoteEntry[] = [];
+
+		const files = this.app.vault.getMarkdownFiles();
+		const normalizedFolder = folder ? folder.replace(/\/$/, "") : "";
+		const normalizedTag = tag ? tag.replace(/^#/, "").toLowerCase() : "";
+
+		for (const file of files) {
+			if (normalizedFolder) {
+				if (!file.path.startsWith(normalizedFolder + "/") &&
+					file.path !== normalizedFolder) {
+					continue;
+				}
+			}
+
+			const entry = this.buildNoteEntry(file);
+			if (normalizedTag) {
+				const has = entry.tags.some(
+					(t) => t.replace(/^#/, "").toLowerCase() === normalizedTag,
+				);
+				if (!has) {
+					continue;
+				}
+			}
+
+			notes.push(entry);
+		}
+
+		return notes.sort((a, b) => a.path.localeCompare(b.path));
+	}
+
+	private async buildLinks(): Promise<LinkGraph> {
+		await this.metadataCacheResolved;
+
+		const resolved: Record<string, Record<string, number>> = {};
+		const unresolved: Record<string, Record<string, number>> = {};
+
+		for (const [source, links] of Object.entries(
+			this.app.metadataCache.resolvedLinks,
+		)) {
+			resolved[source] = { ...links };
+		}
+
+		for (const [source, links] of Object.entries(
+			this.app.metadataCache.unresolvedLinks,
+		)) {
+			unresolved[source] = { ...links };
+		}
+
+		return { resolved, unresolved };
+	}
+
+	private async getSelfNote(): Promise<NoteEntry | null> {
+		await this.metadataCacheResolved;
+
+		const liveAppId = this.getLiveAppId();
+		if (liveAppId === null) {
+			return null;
+		}
+
+		const sourcePath = this.appIdToPath.get(liveAppId);
+		if (!sourcePath) {
+			return null;
+		}
+
+		const file = this.app.vault.getFileByPath(sourcePath);
+		if (!file) {
+			return null;
+		}
+
+		return this.buildNoteEntry(file);
+	}
+
+	/**
+	 * Feeds vault changes to the notebook so its cached metadata does not go
+	 * stale. Watching starts only once the layout is ready, because the
+	 * initial vault scan would otherwise report every file as a creation.
+	 * Clearing the symlink cache belongs here too, because a folder can turn
+	 * into a symlink after the last check approved it.
+	 */
+	private watchVaultEvents(): void {
+		const record = (
+			kind: VaultEvent["kind"],
+			path: string,
+			oldPath?: string,
+		) => {
+			this.vaultRpc?.recordEvent(kind, path, oldPath);
+			this.symlinkChecker?.clearCache();
+		};
+
+		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(
+				this.app.vault.on("create", (file) => {
+					record("create", file.path);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.vault.on("modify", (file) => {
+					record("modify", file.path);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.vault.on("delete", (file) => {
+					record("delete", file.path);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.vault.on("rename", (file, oldPath) => {
+					record("rename", file.path, oldPath);
+				}),
+			);
+
+			this.registerEvent(
+				this.app.metadataCache.on("changed", (file) => {
+					record("modify", file.path);
+				}),
+			);
+		});
+	}
+
+	/**
+	 * Diagnostic dump for duplicate-copy issues. Paste the call into the
+	 * Obsidian console:
+	 *   app.plugins.plugins["marimo-islands"].debugIslands()
+	 * Reports every island for the active app: location, reactivity, cell index,
+	 * and first 40 chars of decoded code.
+	 */
+	debugIslands() {
+		const appId = this.getLiveAppId();
+		if (!appId) {
+			console.log("[marimo] No active app");
+			return;
+		}
+		const islands = this.allIslands();
+		const report: Array<{
+			source: string;
+			reactive: string;
+			cellIdx: string | null;
+			code: string;
+		}> = [];
+		for (const el of islands) {
+			if (el.getAttribute("data-app-id") !== appId) {
+				continue;
+			}
+			const source = this.isBootstrapIsland(el)
+				? "bootstrap-container"
+				: el.hasAttribute("data-is-understudy")
+					? "bootstrap-understudy"
+					: "view-dom";
+			const reactive = el.getAttribute("data-reactive") ?? "?";
+			const cellIdx = el.getAttribute("data-cell-idx");
+			const code = el.getAttribute("data-mo-code")
+				? decodeURIComponent(el.getAttribute("data-mo-code")!).substring(0, 40)
+				: "";
+			report.push({ source, reactive, cellIdx, code });
+		}
+		console.log(`[marimo] Islands for app ${appId} (active: ${this.currentLiveAppId === appId ? "yes" : "no"}):`);
+		console.table(report);
 	}
 }
 
@@ -803,4 +1530,31 @@ function appIdForPath(path: string): string {
 		hash = (hash * 31 + path.charCodeAt(i)) | 0;
 	}
 	return `note-${(hash >>> 0).toString(36)}`;
+}
+
+class MarimoSettingTab extends PluginSettingTab {
+	plugin: MarimoPlugin;
+
+	constructor(app: App, plugin: MarimoPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		new Setting(containerEl)
+			.setName("Allow writes through symlinked folders")
+			.setDesc(
+				"When disabled, writes to files accessed through symlinks are rejected. Enable this only if you have symlinks in your vault that you trust.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.allowSymlinks).onChange(async (value) => {
+					this.plugin.settings.allowSymlinks = value;
+					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.symlinkChecker?.setAllowSymlinks(value);
+				}),
+			);
+	}
 }
