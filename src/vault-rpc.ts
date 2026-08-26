@@ -626,10 +626,10 @@ export class VaultRpc {
 		await this.ensureParentFolders(path);
 
 		const file = this.host.getAbstractFileByPath(path);
-		if (file && !(file instanceof TFolder)) {
+		if (file instanceof TFile) {
 			// A read-modify-write through the vault never races with an edit
 			// the user is making in an open editor.
-			await this.host.process(file as TFile, (data) => data + text);
+			await this.host.process(file, (data) => data + text);
 		} else {
 			await this.host.create(path, text);
 		}
@@ -641,11 +641,11 @@ export class VaultRpc {
 		unset: string[],
 	): Promise<void> {
 		const file = this.host.getAbstractFileByPath(path);
-		if (!file || file instanceof TFolder) {
+		if (!(file instanceof TFile)) {
 			throw new VaultRpcError("not_found", `File not found: ${path}`);
 		}
 
-		await this.host.processFrontmatter(file as TFile, (frontmatter) => {
+		await this.host.processFrontmatter(file, (frontmatter) => {
 			for (const [key, value] of Object.entries(data)) {
 				frontmatter[key] = value;
 			}

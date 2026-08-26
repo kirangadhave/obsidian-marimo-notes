@@ -184,8 +184,9 @@ class IslandWidget extends WidgetType {
 	}
 
 	toDOM(view: EditorView): HTMLElement {
-		const container = document.createElement("div");
-		container.className = "marimo-lp-block";
+		const container = document.body.createEl("div", {
+			cls: "marimo-lp-block",
+		});
 		this.host.buildIsland(container, this.code, this.path);
 		// Anchor the edit affordance inside the island card so CodeMirror's
 		// contain:paint on the widget cannot clip it at the card border.

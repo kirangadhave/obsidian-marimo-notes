@@ -4,10 +4,12 @@ import {
 	getAllTags,
 	MarkdownPostProcessorContext,
 	Notice,
+	Platform,
 	Plugin,
 	PluginSettingTab,
 	requestUrl,
 	Setting,
+	type SettingDefinitionControl,
 	TAbstractFile,
 	TFile,
 	TFolder,
@@ -52,6 +54,24 @@ const dynamicImport = new Function(
 ) as (url: string) => Promise<IslandsRuntime>;
 
 /**
+ * Minimal interface for Node fs module operations.
+ */
+interface FsOperations {
+	existsSync(path: string): boolean;
+	realpathSync(path: string): string;
+}
+
+/**
+ * Minimal interface for Node path module operations.
+ */
+interface PathOperations {
+	dirname(path: string): string;
+	join(...paths: string[]): string;
+	relative(from: string, to: string): string;
+	isAbsolute(path: string): boolean;
+}
+
+/**
  * Checks symlink containment on desktop, with graceful degradation to no-op
  * on mobile (where symlinks are not creatable inside the app sandbox).
  * Caches results per parent folder.
@@ -60,8 +80,8 @@ class SymlinkChecker {
 	private cache = new Map<string, boolean>();
 	private vaultBasePath: string;
 	private allowSymlinks: boolean;
-	private fs: typeof import("fs") | null = null;
-	private path: typeof import("path") | null = null;
+	private fs: FsOperations | null = null;
+	private path: PathOperations | null = null;
 
 	constructor(vaultBasePath: string, allowSymlinks: boolean) {
 		this.vaultBasePath = vaultBasePath;
@@ -70,14 +90,17 @@ class SymlinkChecker {
 	}
 
 	private initNodeModules(): void {
+		// On mobile, Platform.isDesktop is false and Node modules are unavailable.
+		if (!Platform.isDesktop) {
+			return;
+		}
 		try {
 			// Dynamic requires avoid bundling these into the mobile build.
-			// esbuild.config.mjs externalizes all builtins, so require returns
-			// the module or undefined on mobile where Node is unavailable.
-			this.fs = require("fs");
-			this.path = require("path");
+			// esbuild.config.mjs externalizes all builtins.
+			this.fs = require("fs") as FsOperations;
+			this.path = require("path") as PathOperations;
 		} catch {
-			// Mobile path: Node unavailable, no-op returns true.
+			// If requires fail, degrade to no-op on mobile.
 		}
 	}
 
@@ -344,7 +367,7 @@ export default class MarimoPlugin extends Plugin {
 			if (!pre?.parentElement) {
 				continue;
 			}
-			const host = document.createElement("div");
+			const host = document.body.createEl("div");
 			pre.replaceWith(host);
 			this.renderIsland(codeBlock.textContent ?? "", host, ctx);
 		}
@@ -942,7 +965,6 @@ export default class MarimoPlugin extends Plugin {
 				css: await adapter.read(`${vendorDir}/style.css`),
 			};
 		}
-		console.info("[marimo] no vendored runtime, falling back to CDN");
 		const res = await requestUrl(`${CDN_BASE}/style.css`);
 		return { mainUrl: `${CDN_BASE}/main.js`, css: res.text };
 	}
@@ -1007,10 +1029,6 @@ export default class MarimoPlugin extends Plugin {
 			data.port instanceof MessagePort
 		) {
 			const adapter = this.app.vault.adapter;
-			let vaultBasePath = "";
-			if (typeof (adapter as any).getBasePath === "function") {
-				vaultBasePath = (adapter as any).getBasePath();
-			}
 
 			const host: VaultRpcHost = {
 				getFiles: () =>
@@ -1036,17 +1054,30 @@ export default class MarimoPlugin extends Plugin {
 				createFolder: async (path: string) => {
 					await this.app.vault.createFolder(path);
 				},
-				cachedRead: (file: TAbstractFile) => this.app.vault.cachedRead(file as TFile),
+				cachedRead: (file: TAbstractFile) => {
+					if (!(file instanceof TFile)) {
+						throw new Error(`Expected TFile, got ${file.constructor.name}`);
+					}
+					return this.app.vault.cachedRead(file);
+				},
 				create: async (path: string, data: string) => {
 					await this.app.vault.create(path, data);
 				},
 				createBinary: async (path: string, data: ArrayBuffer) => {
 					await this.app.vault.createBinary(path, data);
 				},
-				modify: (file: TAbstractFile, data: string) =>
-					this.app.vault.modify(file as TFile, data),
-				modifyBinary: (file: TAbstractFile, data: ArrayBuffer) =>
-					this.app.vault.modifyBinary(file as TFile, data),
+				modify: (file: TAbstractFile, data: string) => {
+					if (!(file instanceof TFile)) {
+						throw new Error(`Expected TFile, got ${file.constructor.name}`);
+					}
+					return this.app.vault.modify(file, data);
+				},
+				modifyBinary: (file: TAbstractFile, data: ArrayBuffer) => {
+					if (!(file instanceof TFile)) {
+						throw new Error(`Expected TFile, got ${file.constructor.name}`);
+					}
+					return this.app.vault.modifyBinary(file, data);
+				},
 				process: (file: TFile, fn: (data: string) => string) =>
 					this.app.vault.process(file, fn),
 				processFrontmatter: (file: TFile, fn: (frontmatter: Record<string, unknown>) => void) =>
@@ -1090,7 +1121,7 @@ export default class MarimoPlugin extends Plugin {
 		if (this.workerPatched) {
 			return;
 		}
-		// eslint-disable-next-line @typescript-eslint/no-this-alias
+		// eslint-disable-next-line @typescript-eslint/no-this-alias -- Capture plugin context for nested function
 		const plugin = this;
 		const NativeWorker = window.Worker;
 		const PatchedWorker = function (
@@ -1538,6 +1569,19 @@ class MarimoSettingTab extends PluginSettingTab {
 	constructor(app: App, plugin: MarimoPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	getSettingDefinitions(): SettingDefinitionControl<"allowSymlinks">[] {
+		return [
+			{
+				name: "Allow writes through symlinked folders",
+				desc: "When disabled, writes to files accessed through symlinks are rejected. Enable this only if you have symlinks in your vault that you trust.",
+				control: {
+					type: "toggle",
+					key: "allowSymlinks",
+				},
+			},
+		];
 	}
 
 	display(): void {
