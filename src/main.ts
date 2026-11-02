@@ -31,6 +31,8 @@ import {
  */
 const ISLANDS_VERSION = "0.24.0";
 const CDN_BASE = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VERSION}/dist`;
+// Font-face rules only; its relative urls resolve to src/fonts/KaTeX in the same package.
+const KATEX_FONTS_URL = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VERSION}/src/css/katex-fonts.css`;
 
 interface MarimoPluginSettings {
 	allowSymlinks: boolean;
@@ -206,6 +208,7 @@ export default class MarimoPlugin extends Plugin {
 	symlinkChecker: SymlinkChecker | null = null;
 	private runtime: Promise<IslandsRuntime> | null = null;
 	private runtimeStylesheet: CSSStyleSheet | null = null;
+	private fontsStylesheet: CSSStyleSheet | null = null;
 	private initTimer: number | null = null;
 	private bootstrapContainer: HTMLElement | null = null;
 	private workerPatched = false;
@@ -294,6 +297,12 @@ export default class MarimoPlugin extends Plugin {
 	}
 
 	onunload() {
+		if (this.fontsStylesheet) {
+			document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
+				(sheet) => sheet !== this.fontsStylesheet,
+			);
+			this.fontsStylesheet = null;
+		}
 		if (this.runtimeStylesheet) {
 			document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
 				(sheet) => sheet !== this.runtimeStylesheet,
@@ -923,6 +932,7 @@ export default class MarimoPlugin extends Plugin {
 			this.runtime = (async () => {
 				const source = await this.resolveRuntimeSource();
 				this.injectStyles(source.css);
+				void this.loadMathFonts();
 				// The module auto-initializes with the DOM as of this import;
 				// record it so initializeIslands doesn't double-start.
 				this.initializedCells = new Set(this.cellEntries());
@@ -996,6 +1006,35 @@ export default class MarimoPlugin extends Plugin {
 		this.runtimeStylesheet = new CSSStyleSheet();
 		this.runtimeStylesheet.replaceSync(css);
 		document.adoptedStyleSheets = [...document.adoptedStyleSheets, this.runtimeStylesheet];
+	}
+
+	/**
+	 * The runtime sheet styles math with KaTeX's font families but declares
+	 * none of them; marimo's own islands export links KaTeX's css from a CDN
+	 * for that. Load the package's katex-fonts.css with its relative font urls
+	 * resolved against its own url (Chromium resolves a constructed sheet's
+	 * urls against the document, baseURL option or not). Fonts are
+	 * document-wide, so the document is the only adopter. Without it (offline),
+	 * math renders in fallback fonts, as before.
+	 */
+	private async loadMathFonts() {
+		if (this.fontsStylesheet) {
+			return;
+		}
+		try {
+			const res = await requestUrl(KATEX_FONTS_URL);
+			const css = res.text.replace(
+				/url\((["']?)([^"')]+)\1\)/g,
+				(_match, quote: string, path: string) =>
+					`url(${quote}${new URL(path, KATEX_FONTS_URL).href}${quote})`,
+			);
+			const sheet = new CSSStyleSheet();
+			sheet.replaceSync(css);
+			this.fontsStylesheet = sheet;
+			document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+		} catch (error) {
+			console.warn("[marimo] could not load KaTeX fonts; math uses fallback fonts", error);
+		}
 	}
 
 	/** Current loader message, derived from the observed boot stage. */
