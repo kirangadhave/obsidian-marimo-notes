@@ -206,6 +206,8 @@ export default class MarimoPlugin extends Plugin {
 	symlinkChecker: SymlinkChecker | null = null;
 	private runtime: Promise<IslandsRuntime> | null = null;
 	private runtimeStylesheet: CSSStyleSheet | null = null;
+	private runtimeCss: string | null = null;
+	private runtimeSuffix: string | null = null;
 	private initTimer: number | null = null;
 	private bootstrapContainer: HTMLElement | null = null;
 	private workerPatched = false;
@@ -282,6 +284,11 @@ export default class MarimoPlugin extends Plugin {
 			}),
 		);
 
+		// Fires when the base color scheme, theme, or snippets change.
+		this.registerEvent(
+			this.app.workspace.on("css-change", () => this.syncIslandTheme()),
+		);
+
 		this.addCommand({
 			id: "reinitialize",
 			name: "Reinitialize notebooks in open notes",
@@ -325,6 +332,7 @@ export default class MarimoPlugin extends Plugin {
 		const wrapper = el.createDiv({ cls: "marimo-island-block" });
 		// marimo's stylesheet keys dark mode off a Tailwind-style `.dark`
 		// ancestor; mirror Obsidian's theme onto the island container.
+		// syncIslandTheme refreshes it when the theme changes.
 		wrapper.classList.toggle("dark", document.body.hasClass("theme-dark"));
 
 		// All cells from the same note share one app id, i.e. one reactive
@@ -840,6 +848,9 @@ export default class MarimoPlugin extends Plugin {
 	 * titled document sheets. Marimo's Tailwind utilities (tagged with @layer
 	 * utilities) beat any marimo* sheet with identical specificity, so adopted
 	 * sheets placed earlier do not disrupt their cascade ranking.
+	 *
+	 * Last, restates the vault's theme class in each shadow root (see
+	 * syncShadowTheme), so widgets mounted after a theme switch catch up.
 	 */
 	private scrubShadowStyles(root: Document | ShadowRoot) {
 		const els = root.querySelectorAll<HTMLElement>("*");
@@ -863,6 +874,7 @@ export default class MarimoPlugin extends Plugin {
 			if (this.runtimeStylesheet && !sr.adoptedStyleSheets.includes(this.runtimeStylesheet)) {
 				sr.adoptedStyleSheets = [...sr.adoptedStyleSheets, this.runtimeStylesheet];
 			}
+			syncShadowTheme(sr);
 			this.scrubShadowStyles(sr);
 		}
 	}
@@ -990,12 +1002,35 @@ export default class MarimoPlugin extends Plugin {
 	 * See scrubShadowStyles.
 	 */
 	private injectStyles(css: string) {
-		if (this.runtimeStylesheet) {
-			return;
+		this.runtimeStylesheet ??= new CSSStyleSheet();
+		const suffix = schemeCss();
+		// css-change fires for every appearance tweak (fonts, snippets, accent);
+		// re-parse the runtime sheet only when what it states changed.
+		if (css !== this.runtimeCss || suffix !== this.runtimeSuffix) {
+			this.runtimeStylesheet.replaceSync(`${css}\n${suffix}`);
+			this.runtimeCss = css;
+			this.runtimeSuffix = suffix;
 		}
-		this.runtimeStylesheet = new CSSStyleSheet();
-		this.runtimeStylesheet.replaceSync(css);
-		document.adoptedStyleSheets = [...document.adoptedStyleSheets, this.runtimeStylesheet];
+		if (!document.adoptedStyleSheets.includes(this.runtimeStylesheet)) {
+			document.adoptedStyleSheets = [...document.adoptedStyleSheets, this.runtimeStylesheet];
+		}
+	}
+
+	/**
+	 * Restates the vault's color scheme everywhere the runtime keeps its own
+	 * copy: the scheme rule in the runtime sheet (replaceSync updates every
+	 * shadow root that adopted it), the `.dark` mirror on each island
+	 * container, and the theme class inside each widget's shadow root.
+	 */
+	private syncIslandTheme() {
+		if (this.runtimeCss !== null) {
+			this.injectStyles(this.runtimeCss);
+		}
+		const dark = document.body.hasClass("theme-dark");
+		for (const wrapper of Array.from(document.querySelectorAll(".marimo-island-block"))) {
+			wrapper.classList.toggle("dark", dark);
+		}
+		this.scrubShadowStyles(document);
 	}
 
 	/** Current loader message, derived from the observed boot stage. */
@@ -1607,6 +1642,43 @@ function isObsidianSheet(sheet: CSSStyleSheet): boolean {
 	}
 	sheetVerdicts.set(sheet, verdict);
 	return verdict;
+}
+
+/**
+ * The runtime sheet pins `color-scheme: light` on every `.marimo` element,
+ * including the namespace div at the top of each widget's shadow root, and
+ * resolves the inherited text color there. Its dark rules
+ * (`.marimo:is(.dark *)`, `.marimo .dark`) cannot reach that div from outside
+ * the shadow root, so widget text kept its light color on a dark background.
+ * This rule is unlayered and last in the runtime sheet, so it outranks the
+ * runtime's `@layer base` in the document and in every shadow root that
+ * adopts the sheet. The csstools toggle covers engines without light-dark().
+ */
+function schemeCss(): string {
+	return document.body.hasClass("theme-dark")
+		? ".marimo{color-scheme:dark;--csstools-color-scheme--light: ;}"
+		: ".marimo{color-scheme:light;--csstools-color-scheme--light:initial;}";
+}
+
+/**
+ * The runtime reads the theme once per load and renders it as
+ * `<div class="marimo"><div class="contents ${theme}">` in each widget's
+ * shadow root. Restate it from the vault so a theme switch reaches open
+ * widgets. React leaves the class alone afterwards, since the theme it
+ * renders never changes.
+ */
+function syncShadowTheme(sr: ShadowRoot) {
+	// :scope never matches in ShadowRoot.querySelector; walk the children.
+	const namespace = Array.from(sr.children).find((el) => el.classList.contains("marimo"));
+	const contents = namespace
+		? Array.from(namespace.children).find((el) => el.classList.contains("contents"))
+		: undefined;
+	if (!contents) {
+		return;
+	}
+	const dark = document.body.hasClass("theme-dark");
+	contents.classList.toggle("dark", dark);
+	contents.classList.toggle("light", !dark);
 }
 
 function appIdForPath(path: string): string {
