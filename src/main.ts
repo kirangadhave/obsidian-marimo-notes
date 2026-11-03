@@ -34,11 +34,41 @@ const CDN_BASE = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VE
 
 interface MarimoPluginSettings {
 	allowSymlinks: boolean;
+	matchObsidianColors: boolean;
 }
 
 const DEFAULT_SETTINGS: MarimoPluginSettings = {
 	allowSymlinks: false,
+	matchObsidianColors: true,
 };
+
+/**
+ * Maps the runtime's palette variables to the vault theme's, so a notebook
+ * paints with the theme's own colors and fonts, a custom theme included.
+ * Appended after the scheme rule; components that hardcode Tailwind colors
+ * keep marimo's.
+ */
+const OBSIDIAN_COLORS_CSS =
+	".marimo{" +
+	"--background:var(--background-primary);" +
+	"--foreground:var(--text-normal);" +
+	"--muted:var(--background-secondary);" +
+	"--muted-foreground:var(--text-muted);" +
+	"--card:var(--background-primary-alt);" +
+	"--card-foreground:var(--text-normal);" +
+	"--popover:var(--background-secondary);" +
+	"--popover-foreground:var(--text-normal);" +
+	"--border:var(--background-modifier-border);" +
+	"--input:var(--background-modifier-border-focus);" +
+	"--primary:var(--interactive-accent);" +
+	"--primary-foreground:var(--text-on-accent);" +
+	"--accent:var(--background-modifier-hover);" +
+	"--accent-foreground:var(--text-normal);" +
+	"--link:var(--link-color);" +
+	"--text-font:var(--font-text);" +
+	"--monospace-font:var(--font-monospace);" +
+	"--radius:var(--radius-m);" +
+	"}";
 
 interface IslandsRuntime {
 	initialize(): Promise<void>;
@@ -1006,9 +1036,10 @@ export default class MarimoPlugin extends Plugin {
 	 */
 	private injectStyles(css: string) {
 		this.runtimeStylesheet ??= new CSSStyleSheet();
+		const colors = this.settings.matchObsidianColors ? OBSIDIAN_COLORS_CSS : "";
 		const dark = document.body.hasClass("theme-dark");
 		const json = this.runtimeDark !== null && dark !== this.runtimeDark ? jsonViewerCss(dark) : "";
-		const suffix = `${schemeCss()}${json}`;
+		const suffix = `${schemeCss()}${colors}${json}`;
 		// css-change fires for every appearance tweak (fonts, snippets, accent);
 		// re-parse the runtime sheet only when what it states changed.
 		if (css !== this.runtimeCss || suffix !== this.runtimeSuffix) {
@@ -1028,7 +1059,7 @@ export default class MarimoPlugin extends Plugin {
 	 * shadow root that adopted it), the `.dark` mirror on each island
 	 * container, and the theme class inside each widget's shadow root.
 	 */
-	private syncIslandTheme() {
+	syncIslandTheme() {
 		if (this.runtimeCss !== null) {
 			this.injectStyles(this.runtimeCss);
 		}
@@ -1776,7 +1807,7 @@ class MarimoSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	getSettingDefinitions(): SettingDefinitionControl<"allowSymlinks">[] {
+	getSettingDefinitions(): SettingDefinitionControl<"allowSymlinks" | "matchObsidianColors">[] {
 		return [
 			{
 				name: "Allow writes through symlinked folders",
@@ -1784,6 +1815,14 @@ class MarimoSettingTab extends PluginSettingTab {
 				control: {
 					type: "toggle",
 					key: "allowSymlinks",
+				},
+			},
+			{
+				name: "Match Obsidian theme colors",
+				desc: "Paint notebooks with the vault theme's background, text, accent, and fonts. When disabled, notebooks use marimo's own light and dark palettes.",
+				control: {
+					type: "toggle",
+					key: "matchObsidianColors",
 				},
 			},
 		];
@@ -1803,6 +1842,19 @@ class MarimoSettingTab extends PluginSettingTab {
 					this.plugin.settings.allowSymlinks = value;
 					await this.plugin.saveData(this.plugin.settings);
 					this.plugin.symlinkChecker?.setAllowSymlinks(value);
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Match Obsidian theme colors")
+			.setDesc(
+				"Paint notebooks with the vault theme's background, text, accent, and fonts. When disabled, notebooks use marimo's own light and dark palettes.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.matchObsidianColors).onChange(async (value) => {
+					this.plugin.settings.matchObsidianColors = value;
+					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.syncIslandTheme();
 				}),
 			);
 	}
