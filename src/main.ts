@@ -615,8 +615,15 @@ export default class MarimoPlugin extends Plugin {
 			const appId = el.getAttribute("data-app-id") ?? "";
 			if (!allApps.has(appId)) {
 				el.remove();
-			} else if (!el.hasAttribute("data-is-understudy")) {
-				// Only update reactivity for bootstrap cells, not understudies.
+			} else if (el.hasAttribute("data-is-understudy")) {
+				// Understudies stand in for the active note's off-screen cells.
+				// Another note's would put a second app on the page, and the
+				// runtime would start a second kernel in the one interpreter.
+				// ensureUnderStudies rebuilds them when that note is active again.
+				if (appId !== capturedAppId) {
+					el.remove();
+				}
+			} else {
 				el.setAttribute("data-reactive", String(visibleApps.has(appId)));
 			}
 		}
