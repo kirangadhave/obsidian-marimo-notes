@@ -107,15 +107,14 @@ via its worker shim.
   shadow roots adopt it), live-preview/reading-view DOM duplication (only the
   active note's islands join the live app), and recreated block DOM rebinding
   without a kernel restart (data-mo-code + cell index map).
-- A notebook renders in the runtime's light colors, whatever theme the vault
-  uses. The published runtime does not ship CSS `light-dark()` to the browser.
-  It rewrites its colors into a polyfill that reuses one variable name across
-  rules, so a color can read a value that belongs to an unrelated property.
-  This one is not solved yet.
-- The same polyfill can misrender single colors in a light vault: dict output
-  keys can paint near-white on white, and a table row can paint dark. A reload
-  of the note usually clears it. The copy button on dict output floats over
-  the text.
+- A notebook follows the vault's base color scheme, light or dark, and
+  switches with it while the note is open. With "Match Obsidian theme colors"
+  on (the default) it also takes the vault theme's background, text, accent
+  and fonts; off, it uses marimo's own light and dark palettes.
+- Plot images (matplotlib and similar) follow the plotting library's style,
+  not the vault theme. After a live switch, array index keys in dict output
+  take the key color until the app reloads. The copy button on dict output
+  floats over the text.
 - Islands are marked an early/experimental feature upstream.
 
 ## Vault access
