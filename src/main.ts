@@ -1008,6 +1008,7 @@ export default class MarimoPlugin extends Plugin {
 		// re-parse the runtime sheet only when what it states changed.
 		if (css !== this.runtimeCss || suffix !== this.runtimeSuffix) {
 			this.runtimeStylesheet.replaceSync(`${css}\n${suffix}`);
+			widenDarkRules(this.runtimeStylesheet.cssRules);
 			this.runtimeCss = css;
 			this.runtimeSuffix = suffix;
 		}
@@ -1658,6 +1659,54 @@ function schemeCss(): string {
 	return document.body.hasClass("theme-dark")
 		? ".marimo{color-scheme:dark;--csstools-color-scheme--light: ;}"
 		: ".marimo{color-scheme:light;--csstools-color-scheme--light:initial;}";
+}
+
+/**
+ * The runtime writes its dark rules (every color scale, among others) as
+ * `.marimo .dark`: a `.dark` element inside the island. Widget shadow roots
+ * have one (`.contents.dark`), but a cell's own output does not, because the
+ * plugin's `.dark` sits on the container around the island. Code blocks in
+ * `mo.md` output kept a light background under dark text colors. Add
+ * `.marimo:is(.marimo-island-block.dark *)` to each such selector, so the
+ * island root counts as dark whenever the plugin's container is, and a
+ * stray `.dark` from a theme or another plugin does not trigger it.
+ */
+function widenDarkRules(rules: CSSRuleList) {
+	for (const rule of Array.from(rules)) {
+		if (rule instanceof CSSStyleRule) {
+			const selectors = splitSelectorList(rule.selectorText);
+			const extra = selectors
+				.filter((s) => /^\.marimo \.dark(?![\w\\-])/.test(s))
+				.map((s) => s.replace(/^\.marimo \.dark/, ".marimo:is(.marimo-island-block.dark *)"))
+				.filter((s) => !selectors.includes(s));
+			if (extra.length > 0) {
+				rule.selectorText = [...selectors, ...extra].join(", ");
+			}
+		}
+		if ("cssRules" in rule) {
+			widenDarkRules((rule as CSSGroupingRule).cssRules);
+		}
+	}
+}
+
+/** Splits a selector list on its top-level commas (not those inside :is() etc.). */
+function splitSelectorList(text: string): string[] {
+	const out: string[] = [];
+	let depth = 0;
+	let start = 0;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (c === "(" || c === "[") {
+			depth++;
+		} else if (c === ")" || c === "]") {
+			depth--;
+		} else if (c === "," && depth === 0) {
+			out.push(text.slice(start, i).trim());
+			start = i + 1;
+		}
+	}
+	out.push(text.slice(start).trim());
+	return out;
 }
 
 /**
