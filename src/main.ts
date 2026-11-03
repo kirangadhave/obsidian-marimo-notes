@@ -208,6 +208,7 @@ export default class MarimoPlugin extends Plugin {
 	private runtimeStylesheet: CSSStyleSheet | null = null;
 	private runtimeCss: string | null = null;
 	private runtimeSuffix: string | null = null;
+	private runtimeDark: boolean | null = null;
 	private initTimer: number | null = null;
 	private bootstrapContainer: HTMLElement | null = null;
 	private workerPatched = false;
@@ -934,6 +935,8 @@ export default class MarimoPlugin extends Plugin {
 			this.patchWorkerForPyodide();
 			this.runtime = (async () => {
 				const source = await this.resolveRuntimeSource();
+				// The scheme the runtime's own theme resolves to, once (jsonViewerCss).
+				this.runtimeDark = document.body.hasClass("theme-dark");
 				this.injectStyles(source.css);
 				// The module auto-initializes with the DOM as of this import;
 				// record it so initializeIslands doesn't double-start.
@@ -1003,7 +1006,9 @@ export default class MarimoPlugin extends Plugin {
 	 */
 	private injectStyles(css: string) {
 		this.runtimeStylesheet ??= new CSSStyleSheet();
-		const suffix = schemeCss();
+		const dark = document.body.hasClass("theme-dark");
+		const json = this.runtimeDark !== null && dark !== this.runtimeDark ? jsonViewerCss(dark) : "";
+		const suffix = `${schemeCss()}${json}`;
 		// css-change fires for every appearance tweak (fonts, snippets, accent);
 		// re-parse the runtime sheet only when what it states changed.
 		if (css !== this.runtimeCss || suffix !== this.runtimeSuffix) {
@@ -1659,6 +1664,31 @@ function schemeCss(): string {
 	return document.body.hasClass("theme-dark")
 		? ".marimo{color-scheme:dark;--csstools-color-scheme--light: ;}"
 		: ".marimo{color-scheme:light;--csstools-color-scheme--light:initial;}";
+}
+
+/**
+ * Dict output (@textea/json-viewer in islands 0.24.0) gets its colors in
+ * JavaScript from the theme the runtime picked at load, and keeps them after
+ * a live switch: dark text on a dark note, or light on a light one. Once the
+ * vault's scheme differs from that pick, restate the viewer's own palette for
+ * the current scheme. Array index keys share the key class, so they take the
+ * key color until the app reloads.
+ */
+const JSON_VIEWER_PALETTES = {
+	light: { base: "#002b36", count: "rgba(0,0,0,.3)", int: "#268bd2", string: "#cb4b16" },
+	dark: { base: "#f8f8f8", count: "#b8b8b8", int: "#a16946", string: "#dc9656" },
+};
+
+function jsonViewerCss(dark: boolean): string {
+	const p = JSON_VIEWER_PALETTES[dark ? "dark" : "light"];
+	const at = (sel: string) =>
+		`.marimo .marimo-json-output ${sel},.marimo .marimo-json-output ${sel} *`;
+	return (
+		`.marimo .marimo-json-output,.marimo .marimo-json-output *{color:${p.base}}` +
+		`${at(".data-object-start span")}{color:${p.count}}` +
+		`${at(".int-value")}{color:${p.int}}` +
+		`${at(".string-value")}{color:${p.string}}`
+	);
 }
 
 /**
