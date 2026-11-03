@@ -34,11 +34,41 @@ const CDN_BASE = `https://cdn.jsdelivr.net/npm/@marimo-team/islands@${ISLANDS_VE
 
 interface MarimoPluginSettings {
 	allowSymlinks: boolean;
+	matchObsidianColors: boolean;
 }
 
 const DEFAULT_SETTINGS: MarimoPluginSettings = {
 	allowSymlinks: false,
+	matchObsidianColors: true,
 };
+
+/**
+ * Maps the runtime's palette variables to the vault theme's, so a notebook
+ * paints with the theme's own colors and fonts, a custom theme included.
+ * Appended after the scheme rule; components that hardcode Tailwind colors
+ * keep marimo's.
+ */
+const OBSIDIAN_COLORS_CSS =
+	".marimo{" +
+	"--background:var(--background-primary);" +
+	"--foreground:var(--text-normal);" +
+	"--muted:var(--background-secondary);" +
+	"--muted-foreground:var(--text-muted);" +
+	"--card:var(--background-primary-alt);" +
+	"--card-foreground:var(--text-normal);" +
+	"--popover:var(--background-secondary);" +
+	"--popover-foreground:var(--text-normal);" +
+	"--border:var(--background-modifier-border);" +
+	"--input:var(--background-modifier-border-focus);" +
+	"--primary:var(--interactive-accent);" +
+	"--primary-foreground:var(--text-on-accent);" +
+	"--accent:var(--background-modifier-hover);" +
+	"--accent-foreground:var(--text-normal);" +
+	"--link:var(--link-color);" +
+	"--text-font:var(--font-text);" +
+	"--monospace-font:var(--font-monospace);" +
+	"--radius:var(--radius-m);" +
+	"}";
 
 interface IslandsRuntime {
 	initialize(): Promise<void>;
@@ -206,6 +236,9 @@ export default class MarimoPlugin extends Plugin {
 	symlinkChecker: SymlinkChecker | null = null;
 	private runtime: Promise<IslandsRuntime> | null = null;
 	private runtimeStylesheet: CSSStyleSheet | null = null;
+	private runtimeCss: string | null = null;
+	private runtimeSuffix: string | null = null;
+	private runtimeDark: boolean | null = null;
 	private initTimer: number | null = null;
 	private bootstrapContainer: HTMLElement | null = null;
 	private workerPatched = false;
@@ -282,6 +315,11 @@ export default class MarimoPlugin extends Plugin {
 			}),
 		);
 
+		// Fires when the base color scheme, theme, or snippets change.
+		this.registerEvent(
+			this.app.workspace.on("css-change", () => this.syncIslandTheme()),
+		);
+
 		this.addCommand({
 			id: "reinitialize",
 			name: "Reinitialize notebooks in open notes",
@@ -325,6 +363,7 @@ export default class MarimoPlugin extends Plugin {
 		const wrapper = el.createDiv({ cls: "marimo-island-block" });
 		// marimo's stylesheet keys dark mode off a Tailwind-style `.dark`
 		// ancestor; mirror Obsidian's theme onto the island container.
+		// syncIslandTheme refreshes it when the theme changes.
 		wrapper.classList.toggle("dark", document.body.hasClass("theme-dark"));
 
 		// All cells from the same note share one app id, i.e. one reactive
@@ -840,6 +879,9 @@ export default class MarimoPlugin extends Plugin {
 	 * titled document sheets. Marimo's Tailwind utilities (tagged with @layer
 	 * utilities) beat any marimo* sheet with identical specificity, so adopted
 	 * sheets placed earlier do not disrupt their cascade ranking.
+	 *
+	 * Last, restates the vault's theme class in each shadow root (see
+	 * syncShadowTheme), so widgets mounted after a theme switch catch up.
 	 */
 	private scrubShadowStyles(root: Document | ShadowRoot) {
 		const els = root.querySelectorAll<HTMLElement>("*");
@@ -863,6 +905,7 @@ export default class MarimoPlugin extends Plugin {
 			if (this.runtimeStylesheet && !sr.adoptedStyleSheets.includes(this.runtimeStylesheet)) {
 				sr.adoptedStyleSheets = [...sr.adoptedStyleSheets, this.runtimeStylesheet];
 			}
+			syncShadowTheme(sr);
 			this.scrubShadowStyles(sr);
 		}
 	}
@@ -922,6 +965,8 @@ export default class MarimoPlugin extends Plugin {
 			this.patchWorkerForPyodide();
 			this.runtime = (async () => {
 				const source = await this.resolveRuntimeSource();
+				// The scheme the runtime's own theme resolves to, once (jsonViewerCss).
+				this.runtimeDark = document.body.hasClass("theme-dark");
 				this.injectStyles(source.css);
 				// The module auto-initializes with the DOM as of this import;
 				// record it so initializeIslands doesn't double-start.
@@ -990,12 +1035,39 @@ export default class MarimoPlugin extends Plugin {
 	 * See scrubShadowStyles.
 	 */
 	private injectStyles(css: string) {
-		if (this.runtimeStylesheet) {
-			return;
+		this.runtimeStylesheet ??= new CSSStyleSheet();
+		const colors = this.settings.matchObsidianColors ? OBSIDIAN_COLORS_CSS : "";
+		const dark = document.body.hasClass("theme-dark");
+		const json = this.runtimeDark !== null && dark !== this.runtimeDark ? jsonViewerCss(dark) : "";
+		const suffix = `${schemeCss()}${colors}${json}`;
+		// css-change fires for every appearance tweak (fonts, snippets, accent);
+		// re-parse the runtime sheet only when what it states changed.
+		if (css !== this.runtimeCss || suffix !== this.runtimeSuffix) {
+			this.runtimeStylesheet.replaceSync(`${css}\n${suffix}`);
+			widenDarkRules(this.runtimeStylesheet.cssRules);
+			this.runtimeCss = css;
+			this.runtimeSuffix = suffix;
 		}
-		this.runtimeStylesheet = new CSSStyleSheet();
-		this.runtimeStylesheet.replaceSync(css);
-		document.adoptedStyleSheets = [...document.adoptedStyleSheets, this.runtimeStylesheet];
+		if (!document.adoptedStyleSheets.includes(this.runtimeStylesheet)) {
+			document.adoptedStyleSheets = [...document.adoptedStyleSheets, this.runtimeStylesheet];
+		}
+	}
+
+	/**
+	 * Restates the vault's color scheme everywhere the runtime keeps its own
+	 * copy: the scheme rule in the runtime sheet (replaceSync updates every
+	 * shadow root that adopted it), the `.dark` mirror on each island
+	 * container, and the theme class inside each widget's shadow root.
+	 */
+	syncIslandTheme() {
+		if (this.runtimeCss !== null) {
+			this.injectStyles(this.runtimeCss);
+		}
+		const dark = document.body.hasClass("theme-dark");
+		for (const wrapper of Array.from(document.querySelectorAll(".marimo-island-block"))) {
+			wrapper.classList.toggle("dark", dark);
+		}
+		this.scrubShadowStyles(document);
 	}
 
 	/** Current loader message, derived from the observed boot stage. */
@@ -1609,6 +1681,116 @@ function isObsidianSheet(sheet: CSSStyleSheet): boolean {
 	return verdict;
 }
 
+/**
+ * The runtime sheet pins `color-scheme: light` on every `.marimo` element,
+ * including the namespace div at the top of each widget's shadow root, and
+ * resolves the inherited text color there. Its dark rules
+ * (`.marimo:is(.dark *)`, `.marimo .dark`) cannot reach that div from outside
+ * the shadow root, so widget text kept its light color on a dark background.
+ * This rule is unlayered and last in the runtime sheet, so it outranks the
+ * runtime's `@layer base` in the document and in every shadow root that
+ * adopts the sheet. The csstools toggle covers engines without light-dark().
+ */
+function schemeCss(): string {
+	return document.body.hasClass("theme-dark")
+		? ".marimo{color-scheme:dark;--csstools-color-scheme--light: ;}"
+		: ".marimo{color-scheme:light;--csstools-color-scheme--light:initial;}";
+}
+
+/**
+ * Dict output (@textea/json-viewer in islands 0.24.0) gets its colors in
+ * JavaScript from the theme the runtime picked at load, and keeps them after
+ * a live switch: dark text on a dark note, or light on a light one. Once the
+ * vault's scheme differs from that pick, restate the viewer's own palette for
+ * the current scheme. Array index keys share the key class, so they take the
+ * key color until the app reloads.
+ */
+const JSON_VIEWER_PALETTES = {
+	light: { base: "#002b36", count: "rgba(0,0,0,.3)", int: "#268bd2", string: "#cb4b16" },
+	dark: { base: "#f8f8f8", count: "#b8b8b8", int: "#a16946", string: "#dc9656" },
+};
+
+function jsonViewerCss(dark: boolean): string {
+	const p = JSON_VIEWER_PALETTES[dark ? "dark" : "light"];
+	const at = (sel: string) =>
+		`.marimo .marimo-json-output ${sel},.marimo .marimo-json-output ${sel} *`;
+	return (
+		`.marimo .marimo-json-output,.marimo .marimo-json-output *{color:${p.base}}` +
+		`${at(".data-object-start span")}{color:${p.count}}` +
+		`${at(".int-value")}{color:${p.int}}` +
+		`${at(".string-value")}{color:${p.string}}`
+	);
+}
+
+/**
+ * The runtime writes its dark rules (every color scale, among others) as
+ * `.marimo .dark`: a `.dark` element inside the island. Widget shadow roots
+ * have one (`.contents.dark`), but a cell's own output does not, because the
+ * plugin's `.dark` sits on the container around the island. Code blocks in
+ * `mo.md` output kept a light background under dark text colors. Add
+ * `.marimo:is(.marimo-island-block.dark *)` to each such selector, so the
+ * island root counts as dark whenever the plugin's container is, and a
+ * stray `.dark` from a theme or another plugin does not trigger it.
+ */
+function widenDarkRules(rules: CSSRuleList) {
+	for (const rule of Array.from(rules)) {
+		if (rule instanceof CSSStyleRule) {
+			const selectors = splitSelectorList(rule.selectorText);
+			const extra = selectors
+				.filter((s) => /^\.marimo \.dark(?![\w\\-])/.test(s))
+				.map((s) => s.replace(/^\.marimo \.dark/, ".marimo:is(.marimo-island-block.dark *)"))
+				.filter((s) => !selectors.includes(s));
+			if (extra.length > 0) {
+				rule.selectorText = [...selectors, ...extra].join(", ");
+			}
+		}
+		if ("cssRules" in rule) {
+			widenDarkRules((rule as CSSGroupingRule).cssRules);
+		}
+	}
+}
+
+/** Splits a selector list on its top-level commas (not those inside :is() etc.). */
+function splitSelectorList(text: string): string[] {
+	const out: string[] = [];
+	let depth = 0;
+	let start = 0;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (c === "(" || c === "[") {
+			depth++;
+		} else if (c === ")" || c === "]") {
+			depth--;
+		} else if (c === "," && depth === 0) {
+			out.push(text.slice(start, i).trim());
+			start = i + 1;
+		}
+	}
+	out.push(text.slice(start).trim());
+	return out;
+}
+
+/**
+ * The runtime reads the theme once per load and renders it as
+ * `<div class="marimo"><div class="contents ${theme}">` in each widget's
+ * shadow root. Restate it from the vault so a theme switch reaches open
+ * widgets. React leaves the class alone afterwards, since the theme it
+ * renders never changes.
+ */
+function syncShadowTheme(sr: ShadowRoot) {
+	// :scope never matches in ShadowRoot.querySelector; walk the children.
+	const namespace = Array.from(sr.children).find((el) => el.classList.contains("marimo"));
+	const contents = namespace
+		? Array.from(namespace.children).find((el) => el.classList.contains("contents"))
+		: undefined;
+	if (!contents) {
+		return;
+	}
+	const dark = document.body.hasClass("theme-dark");
+	contents.classList.toggle("dark", dark);
+	contents.classList.toggle("light", !dark);
+}
+
 function appIdForPath(path: string): string {
 	let hash = 0;
 	for (let i = 0; i < path.length; i++) {
@@ -1625,7 +1807,7 @@ class MarimoSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	getSettingDefinitions(): SettingDefinitionControl<"allowSymlinks">[] {
+	getSettingDefinitions(): SettingDefinitionControl<"allowSymlinks" | "matchObsidianColors">[] {
 		return [
 			{
 				name: "Allow writes through symlinked folders",
@@ -1633,6 +1815,14 @@ class MarimoSettingTab extends PluginSettingTab {
 				control: {
 					type: "toggle",
 					key: "allowSymlinks",
+				},
+			},
+			{
+				name: "Match Obsidian theme colors",
+				desc: "Paint notebooks with the vault theme's background, text, accent, and fonts. When disabled, notebooks use marimo's own light and dark palettes.",
+				control: {
+					type: "toggle",
+					key: "matchObsidianColors",
 				},
 			},
 		];
@@ -1652,6 +1842,19 @@ class MarimoSettingTab extends PluginSettingTab {
 					this.plugin.settings.allowSymlinks = value;
 					await this.plugin.saveData(this.plugin.settings);
 					this.plugin.symlinkChecker?.setAllowSymlinks(value);
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Match Obsidian theme colors")
+			.setDesc(
+				"Paint notebooks with the vault theme's background, text, accent, and fonts. When disabled, notebooks use marimo's own light and dark palettes.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.matchObsidianColors).onChange(async (value) => {
+					this.plugin.settings.matchObsidianColors = value;
+					await this.plugin.saveData(this.plugin.settings);
+					this.plugin.syncIslandTheme();
 				}),
 			);
 	}
